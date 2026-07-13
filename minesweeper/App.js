@@ -412,7 +412,15 @@ export default function App() {
             <Text style={styles.statusText}>{fmt(time)}</Text>
           </View>
         </View>
+      </View>
 
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        maximumZoomScale={6}
+        minimumZoomScale={1}
+        bouncesZoom
+      >
         {/* Board — always fits the width; pinch to zoom in */}
         <View
           style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 10, padding: 5 }]}
@@ -509,15 +517,6 @@ export default function App() {
             </Pressable>
           </View>
         )}
-        </View>
-
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        maximumZoomScale={6}
-        minimumZoomScale={1}
-        bouncesZoom
-      >
       </ScrollView>
 
       {/* ---------------- Menu sheet ---------------- */}
@@ -593,7 +592,12 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  scroll: { padding: 14, paddingBottom: 44 },
+ scroll: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 44 },
+  topBar: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line },
+  mineDot: { width: 11, height: 11, borderRadius: 6, backgroundColor: C.red },
+  flagBtn: { width: 26, height: 26, borderRadius: 8, borderWidth: 1, alignItems: "center", justifyContent: "center", marginLeft: 4 },
+  flagBtnText: { fontSize: 13, fontWeight: "800" },
+  face: { fontSize: 17, fontWeight: "800", color: C.text, fontFamily: MONO },
 
   header: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 },
   title: { color: C.text, fontSize: 22, fontWeight: "800", letterSpacing: 1 },
