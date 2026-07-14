@@ -64,6 +64,8 @@ const C = {
 const NUM_COLORS = ["", "#6FB7FF", "#5EE6B0", "#FF7B7B", "#C99CFF", "#FFB454", "#4FD8D8", "#F0F3FA", "#9AA3B5"];
 const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
 const GAP = 2;
+const TITLE_LETTERS = "MINESWEEP".split("");
+const SECRET = "PINMINES";
 
 /* ------------------------------------------------------------------ */
 /*  Game logic                                                         */
@@ -89,6 +91,13 @@ const makeEmptyBoard = (rows, cols) =>
     mine: false, revealed: false, flagged: false, adj: 0, exploded: false,
   }));
 
+/**
+ * Mines are scattered at random, with one constraint: no 2x2 block anywhere on
+ * the board may be four solid mines. That breaks up the dense blobs that make
+ * regions unsolvable, while still allowing the loose clusters Broken Arrow needs
+ * (a mine can reach 6 mine-neighbors with no solid 2x2 — put its safe cells
+ * directly above and below it).
+ */
 function placeMines(board, rows, cols, mineCount, safeIndex) {
   const next = board.map((c) => ({ ...c }));
   const safeZone = new Set([safeIndex, ...nbrs(safeIndex, rows, cols)]);
@@ -100,7 +109,44 @@ function placeMines(board, rows, cols, mineCount, safeIndex) {
     const j = Math.floor(Math.random() * (i + 1));
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
-  pool.slice(0, mineCount).forEach((i) => { next[i].mine = true; });
+
+  const mine = new Array(rows * cols).fill(false);
+  const isMine = (r, c) => r >= 0 && r < rows && c >= 0 && c < cols && mine[r * cols + c];
+
+  // Would putting a mine here complete a solid 2x2? Four blocks touch any cell.
+  const wouldFillSquare = (i) => {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    mine[i] = true;
+    let bad = false;
+    for (const [dr, dc] of [[-1, -1], [-1, 0], [0, -1], [0, 0]]) {
+      const r0 = r + dr;
+      const c0 = c + dc;
+      if (isMine(r0, c0) && isMine(r0, c0 + 1) && isMine(r0 + 1, c0) && isMine(r0 + 1, c0 + 1)) {
+        bad = true;
+        break;
+      }
+    }
+    mine[i] = false;
+    return bad;
+  };
+
+  let placed = 0;
+  const rejected = [];
+  for (const i of pool) {
+    if (placed >= mineCount) break;
+    if (wouldFillSquare(i)) { rejected.push(i); continue; }
+    mine[i] = true;
+    placed++;
+  }
+  // Safety valve: an absurdly dense board might not fit under the rule.
+  for (const i of rejected) {
+    if (placed >= mineCount) break;
+    mine[i] = true;
+    placed++;
+  }
+
+  mine.forEach((m, i) => { if (m) next[i].mine = true; });
 
   for (let i = 0; i < next.length; i++) {
     if (next[i].mine) continue;
@@ -133,7 +179,7 @@ const countEarnedFlags = (board, rows, cols) =>
 /*  Cell                                                               */
 /* ------------------------------------------------------------------ */
 
-const Cell = React.memo(function Cell({ cell, size, over, onPress, onLongPress }) {
+const Cell = React.memo(function Cell({ cell, size, over, peek, onPress, onLongPress }) {
   const showMine = cell.revealed && cell.mine;
   const wrongFlag = over && cell.flagged && !cell.mine;
 
@@ -186,6 +232,12 @@ const Cell = React.memo(function Cell({ cell, size, over, onPress, onLongPress }
       {showMine && (
         <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: size, backgroundColor: cell.exploded ? "#12151C" : C.red }} />
       )}
+      {peek && !cell.revealed && !cell.flagged && cell.mine && (
+        <View style={{
+          position: "absolute", width: size * 0.42, height: size * 0.42,
+          borderRadius: size, borderWidth: 1.5, borderColor: C.red, opacity: 0.85,
+        }} />
+      )}
     </Pressable>
   );
 });
@@ -218,6 +270,9 @@ export default function App() {
   // profile
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [peek, setPeek] = useState(false);
+  const [cheated, setCheated] = useState(false);
 
   // menu — selections stay pending until Start
   const [menuOpen, setMenuOpen] = useState(false);
@@ -257,8 +312,22 @@ export default function App() {
     setFlagMode(false);
     setTime(0);
     setRun(null);
+    setCode("");
+    setPeek(false);
+    setCheated(false);
   }, []);
 
+  const tapLetter = (ch) => {
+    const next = (code + ch).slice(-SECRET.length);
+    setCode(next);
+    if (next === SECRET) {
+      setCode("");
+      setPeek(true);
+      setCheated(true);
+      Vibration.vibrate(60);
+      Alert.alert("X-ray on", "Every mine is showing. This run banks nothing — restart to play for real.");
+    }
+  };
   const restart = () => startGame(modeKey, pendingCustom, blind);
 
   const openMenu = () => { setPendingMode(modeKey); setMenuOpen(true); };
@@ -303,6 +372,11 @@ export default function App() {
 
     setRun(scored);
     Vibration.vibrate(outcome === "loss" ? 200 : [0, 40, 60, 40]);
+
+    if (cheated) {
+      setRun({ ...scored, coins: 0, cheated: true });
+      return;
+    }
 
     const next = await bankRun(profile, scored, modeKey);
     setProfile(next);
@@ -399,9 +473,17 @@ export default function App() {
 
       <View style={styles.topBar}>
         <View style={styles.header}>
-          <Text style={styles.title}>
-            MINE<Text style={{ color: accent }}>SWEEP</Text>
-          </Text>
+          <View style={styles.titleRow}>
+            {TITLE_LETTERS.map((ch, idx) => (
+              <Pressable
+                key={idx}
+                onPress={() => tapLetter(ch)}
+                style={[styles.letterBox, peek && { borderColor: C.red }]}
+              >
+                <Text style={[styles.letter, { color: idx >= 4 ? accent : C.text }]}>{ch}</Text>
+              </Pressable>
+            ))}
+          </View>
           <Pressable onPress={() => setProfileOpen(true)} hitSlop={10} style={styles.wallet}>
             <View style={styles.coinDot} />
             <Text style={styles.walletText}>{profile.coins.toLocaleString()}</Text>
@@ -459,6 +541,7 @@ export default function App() {
                 over={!active}
                 onPress={() => handlePress(i)}
                 onLongPress={() => toggleFlag(i)}
+                peek={peek}
               />
             ))}
           </View>
@@ -732,7 +815,12 @@ const styles = StyleSheet.create({
   },
 
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
-  title: { color: C.text, fontSize: 22, fontWeight: "800", letterSpacing: 1 },
+  titleRow: { flexDirection: "row" },
+  letterBox: {
+    width: 21, height: 27, borderRadius: 5, borderWidth: 1, borderColor: C.line,
+    backgroundColor: C.panel, alignItems: "center", justifyContent: "center", marginRight: 2,
+  },
+  letter: { fontSize: 12, fontWeight: "800", fontFamily: MONO },
   wallet: {
     flexDirection: "row", alignItems: "center", gap: 5,
     backgroundColor: C.panel, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6,
