@@ -1,16 +1,19 @@
 /* ==================================================================
    deduce.js — the single source of truth for logical deduction.
 
-   Two callers, one implementation:
+   The live assistant is built in layers, each strictly stronger than the last,
+   and each only runs when the cheaper one below it has stalled:
 
-     • The live assistant calls applyAutoFlags() after every dig, planting
-       flags on mines that are already proven.
-     • The reward engine calls solveFromFirstClick() at game end to work out
-       which mines logic could never have found (those become UXO), and at
-       generation time to enforce the guess budget.
+     0. confirmFlags — proof by contradiction on the player's own flags.
+     1. basicPass    — the two counting rules every player uses.
+     2. smartPass    — set-difference between overlapping numbers (1-2-1).
+     3. exactPass    — enumerate every legal mine arrangement and keep only what
+                       is true in all of them. This is certainty, not pattern
+                       matching: it finds everything short of a real 50/50.
 
-   These MUST share code. If they ever drift, the game will happily flag a
-   mine that the solver later insists was undeducible.
+   The assistant reasons ONLY from revealed numbers and flags it has proved
+   itself. Manual flags carry no proof, so it never builds on one until
+   confirmFlags earns it.
    ================================================================== */
 
 export const neighborsOf = (i, rows, cols) => {
@@ -28,38 +31,103 @@ export const neighborsOf = (i, rows, cols) => {
   return out;
 };
 
-/* ------------------------------------------------------------------
-   RULE 1 — the counting rule.
-
-   A revealed number knows how many mines surround it. Subtract the flags
-   already placed around it, and if the number of squares still unaccounted
-   for exactly equals the mines still missing, then every one of those
-   squares is a mine. No ambiguity, no choice.
-
-     "3" with 1 flag placed and exactly 2 unknown squares left
-      -> both unknowns are mines.
-
-   This is the ONLY rule the live assistant is allowed to use. It marks;
-   it never opens. The player still chooses every square they dig.
-   ------------------------------------------------------------------ */
+/* Enumeration is 2^n in the worst case, so it needs a leash.
+   FULL_CAP   — a whole frontier component small enough to solve outright,
+                which also unlocks global mine counting.
+   WINDOW_CAP — the local pocket size when the frontier is too big for that,
+                which on a real board is nearly always.                        */
+const FULL_CAP = 22;
+const WINDOW_CAP = 18;
+const STEP_CAP = 120000;
 
 /**
- * Plant every flag that Rule 1 proves, repeating until nothing new appears —
- * one flag often unlocks the next.
- * Returns a new board plus how many flags were added (0 means nothing changed).
- */
-/**
- * The live assistant: flag what's proven, then open what's proven safe, and
- * repeat until nothing new falls out.
+ * Enumerate every legal mine arrangement over a set of cells and constraints.
  *
- * It deliberately IGNORES the player's manual flags and reasons only from
- * revealed numbers plus flags it proved itself. That guarantees it can never
- * open a mine: a wrong manual flag would otherwise let Rule 2 "prove" a mine
- * was safe and detonate it for you, which would be an unforgivable way to lose.
- * If the player manually flagged a square the assistant can prove is safe, the
- * flag is simply wrong — it gets cleared and the square opened.
+ * Returns a Map: mines-in-this-set -> { solutions, mineCount[] }, where
+ * mineCount[j] counts how many of those arrangements put a mine on cell j.
+ * mineCount === solutions means "a mine in every arrangement". mineCount === 0
+ * means "safe in every arrangement".
+ *
+ * Keyed by total because the global mine count can later rule out entire totals.
+ * Returns null if it blows the step budget.
  */
-export function applyAssist(board, rows, cols, sweep = true) {
+function enumerate(cells, constraints) {
+  const k = cells.length;
+  const pos = new Map(cells.map((c, i) => [c, i]));
+
+  const cs = constraints.map((c) => ({ idx: c.cells.map((x) => pos.get(x)), n: c.n }));
+  const byCell = Array.from({ length: k }, () => []);
+  cs.forEach((c, ci) => c.idx.forEach((i) => byCell[i].push(ci)));
+
+  const assign = new Int8Array(k);
+  const mines = new Int32Array(cs.length);
+  const seen = new Int32Array(cs.length);
+
+  const byTotal = new Map();
+  let steps = 0;
+  let overflow = false;
+
+  // Still satisfiable: hasn't overshot, and can still reach its count.
+  const alive = (ci) => {
+    const left = cs[ci].idx.length - seen[ci];
+    return mines[ci] <= cs[ci].n && mines[ci] + left >= cs[ci].n;
+  };
+
+  const rec = (i, total) => {
+    if (overflow) return;
+    if (++steps > STEP_CAP) { overflow = true; return; }
+
+    if (i === k) {
+      for (let ci = 0; ci < cs.length; ci++) if (mines[ci] !== cs[ci].n) return;
+      let e = byTotal.get(total);
+      if (!e) { e = { solutions: 0, mineCount: new Int32Array(k) }; byTotal.set(total, e); }
+      e.solutions++;
+      for (let j = 0; j < k; j++) if (assign[j]) e.mineCount[j]++;
+      return;
+    }
+
+    for (let v = 0; v <= 1; v++) {
+      assign[i] = v;
+      for (const ci of byCell[i]) { seen[ci]++; if (v) mines[ci]++; }
+
+      let ok = true;
+      for (const ci of byCell[i]) if (!alive(ci)) { ok = false; break; }
+      if (ok) rec(i + 1, total + v);
+
+      for (const ci of byCell[i]) { seen[ci]--; if (v) mines[ci]--; }
+      assign[i] = 0;
+    }
+  };
+
+  rec(0, 0);
+  return overflow ? null : byTotal;
+}
+
+/** Cells that are a mine in every arrangement, and cells that are safe in every one. */
+function certainties(cells, byTotal, totals) {
+  const k = cells.length;
+  const alwaysMine = new Array(k).fill(true);
+  const alwaysSafe = new Array(k).fill(true);
+
+  for (const t of totals) {
+    const e = byTotal.get(t);
+    if (!e) continue;
+    for (let j = 0; j < k; j++) {
+      if (e.mineCount[j] !== e.solutions) alwaysMine[j] = false;
+      if (e.mineCount[j] !== 0) alwaysSafe[j] = false;
+    }
+  }
+  return { alwaysMine, alwaysSafe };
+}
+
+/**
+ * The live assistant.
+ *
+ * @param sweep      may it open squares, or only flag?
+ * @param smart      may it use set-difference and exact enumeration?
+ * @param totalMines the board's mine count — without it, no global counting.
+ */
+export function applyAssist(board, rows, cols, sweep = true, smart = false, totalMines = null) {
   let next = board;
   let flagsAdded = 0;
   let opened = 0;
@@ -67,74 +135,374 @@ export function applyAssist(board, rows, cols, sweep = true) {
   const clone = () => { if (next === board) next = board.map((c) => ({ ...c })); };
   const proven = (i) => next[i].flagged && next[i].auto;
 
+  const flagMine = (i) => {
+    if (proven(i) || next[i].revealed) return false;
+    clone();
+    next[i] = { ...next[i], flagged: true, auto: true };
+    flagsAdded++;
+    return true;
+  };
+
   const open = (start) => {
+    if (next[start].revealed || next[start].mine || proven(start)) return false;
+    clone();
     const stack = [start];
+    let did = false;
     while (stack.length) {
       const i = stack.pop();
       const c = next[i];
-      if (c.revealed || c.mine || c.flagged) continue; // any flag, manual or auto, is left alone
+      if (c.revealed || c.mine || proven(i)) continue; // c.mine: it can never detonate
       c.revealed = true;
+      c.flagged = false;
       opened++;
+      did = true;
       if (c.adj === 0) {
         neighborsOf(i, rows, cols).forEach((n) => {
           if (!next[n].revealed && !proven(n)) stack.push(n);
         });
       }
     }
+    return did;
   };
 
-  let changed = true;
-  while (changed) {
-    changed = false;
+  /** "n mines hide among these squares" — one revealed number's worth of truth. */
+  const constraintAt = (i) => {
+    const cell = next[i];
+    if (!cell.revealed || cell.mine || cell.adj === 0) return null;
+    const ns = neighborsOf(i, rows, cols);
+    const set = ns.filter((n) => !next[n].revealed && !proven(n));
+    if (set.length === 0) return null;
+    const found = ns.filter((n) => proven(n)).length;
+    return { at: i, set, n: cell.adj - found };
+  };
 
+  const allConstraints = () => {
+    const out = [];
     for (let i = 0; i < next.length; i++) {
-      const cell = next[i];
-      if (!cell.revealed || cell.mine || cell.adj === 0) continue;
+      const c = constraintAt(i);
+      if (c) out.push(c);
+    }
+    return out;
+  };
 
-      const ns = neighborsOf(i, rows, cols);
-      const unknown = ns.filter((n) => !next[n].revealed && !proven(n));
-      if (unknown.length === 0) continue;
+  /* ---------- Layer 0: earn the player's flags ----------
+     A manual flag carries no proof. This gives it one: assume the square is NOT
+     a mine and propagate the numbers. If some number ends up needing more mines
+     than it has squares left, the assumption was impossible — the square must be
+     a mine, and the flag becomes as trustworthy as one the assistant planted.
 
-      const found = ns.filter((n) => proven(n)).length;
+     Only the confirming direction is ever tested. If a flag is wrong, that is
+     the player's mistake to find; we never volunteer it.                       */
+  const contradicts = (cell) => {
+    const state = new Int8Array(next.length).fill(-1); // -1 unknown, 0 safe, 1 mine
+    for (let i = 0; i < next.length; i++) {
+      if (next[i].revealed) state[i] = 0;
+      else if (proven(i)) state[i] = 1;
+    }
+    state[cell] = 0; // the assumption: this square is safe
 
-      // RULE 1 — the squares left over must all be mines.
-      if (cell.adj - found === unknown.length) {
-        clone();
-        unknown.forEach((n) => { next[n] = { ...next[n], flagged: true, auto: true }; });
-        flagsAdded += unknown.length;
-        changed = true;
-        continue;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = 0; i < next.length; i++) {
+        const c = next[i];
+        if (!c.revealed || c.mine || c.adj === 0) continue;
+
+        const ns = neighborsOf(i, rows, cols);
+        let mines = 0;
+        const unknown = [];
+        for (const x of ns) {
+          if (state[x] === 1) mines++;
+          else if (state[x] === -1) unknown.push(x);
+        }
+
+        if (mines > c.adj) return true;                   // too many mines
+        if (mines + unknown.length < c.adj) return true;  // not enough squares left
+        if (unknown.length === 0) continue;
+
+        if (mines === c.adj) {
+          unknown.forEach((x) => { state[x] = 0; });
+          changed = true;
+        } else if (mines + unknown.length === c.adj) {
+          unknown.forEach((x) => { state[x] = 1; });
+          changed = true;
+        }
       }
+    }
+    return false;
+  };
 
-      // RULE 2 — every mine here is accounted for, so the rest is safe.
-      if (sweep && cell.adj === found) {
+  const confirmFlags = () => {
+    let changed = false;
+    for (let i = 0; i < next.length; i++) {
+      const c = next[i];
+      if (!c.flagged || c.auto || c.revealed) continue;
+      if (contradicts(i)) {
         clone();
-        unknown.forEach(open);
+        next[i] = { ...next[i], auto: true, confirmed: true };
         changed = true;
       }
     }
+    return changed;
+  };
+
+  /* ---------- Layer 1: the two counting rules ---------- */
+  const basicPass = () => {
+    let changed = false;
+    for (const c of allConstraints()) {
+      if (c.n === c.set.length) c.set.forEach((x) => { if (flagMine(x)) changed = true; });
+      else if (sweep && c.n === 0) c.set.forEach((x) => { if (open(x)) changed = true; });
+    }
+    return changed;
+  };
+
+  /* ---------- Layer 2: set difference ----------
+     SUBTRACTION — if P's squares sit inside Q's, then (Q \ P) holds (Q.n - P.n)
+     mines: a constraint matching no number on the board, which is what lets
+     deductions chain.
+     DIFFERENCE — if Q.n - P.n equals |Q \ P|, every square in Q \ P is a mine and
+     every square in P \ Q is safe.                                              */
+  const smartPass = () => {
+    const pool = [];
+    const seenKeys = new Set();
+    const keyOf = (s) => s.slice().sort((a, b) => a - b).join(",");
+
+    const add = (set, n) => {
+      if (set.length === 0 || n < 0 || n > set.length) return false;
+      const k = keyOf(set);
+      if (seenKeys.has(k)) return false;
+      seenKeys.add(k);
+      pool.push({ set, n });
+      return true;
+    };
+
+    allConstraints().forEach((c) => add(c.set, c.n));
+
+    const CAP = 700;
+    for (let round = 0; round < 3 && pool.length < CAP; round++) {
+      const snap = pool.slice();
+      let grew = false;
+      for (let a = 0; a < snap.length && pool.length < CAP; a++) {
+        for (let b = 0; b < snap.length && pool.length < CAP; b++) {
+          const P = snap[a];
+          const Q = snap[b];
+          if (P === Q || P.set.length >= Q.set.length) continue;
+          if (!P.set.every((x) => Q.set.includes(x))) continue;
+          if (add(Q.set.filter((x) => !P.set.includes(x)), Q.n - P.n)) grew = true;
+        }
+      }
+      if (!grew) break;
+    }
+
+    for (const c of pool) {
+      let changed = false;
+      if (c.n === c.set.length) c.set.forEach((x) => { if (flagMine(x)) changed = true; });
+      else if (sweep && c.n === 0) c.set.forEach((x) => { if (open(x)) changed = true; });
+      if (changed) return true; // board moved; every cached constraint is stale
+    }
+
+    for (const P of pool) {
+      for (const Q of pool) {
+        if (P === Q) continue;
+        const onlyQ = Q.set.filter((x) => !P.set.includes(x));
+        if (onlyQ.length === 0 || Q.n - P.n !== onlyQ.length) continue;
+
+        let changed = false;
+        onlyQ.forEach((x) => { if (flagMine(x)) changed = true; });
+        if (sweep) P.set.filter((x) => !Q.set.includes(x)).forEach((x) => { if (open(x)) changed = true; });
+        if (changed) return true;
+      }
+    }
+    return false;
+  };
+
+  const applyCertainties = (cells, alwaysMine, alwaysSafe) => {
+    let changed = false;
+    for (let j = 0; j < cells.length; j++) {
+      if (alwaysMine[j]) { if (flagMine(cells[j])) changed = true; }
+      else if (alwaysSafe[j] && sweep) { if (open(cells[j])) changed = true; }
+    }
+    return changed;
+  };
+
+  /* ---------- Layer 3a: whole frontier, with global mine counting ----------
+     Only possible when every component is small. When it is, feeding in the mine
+     count buys two extra deductions for free:
+
+       • if every surviving arrangement leaves 0 mines for the "outside" — the
+         unknown squares no number touches — the entire outside is safe;
+       • if it leaves exactly as many mines as there are outside squares, every
+         one of them is a mine.                                                  */
+  const fullPass = () => {
+    const cons = allConstraints();
+    if (cons.length === 0) return false;
+
+    const frontier = new Set();
+    cons.forEach((c) => c.set.forEach((x) => frontier.add(x)));
+
+    const parent = new Map();
+    const find = (x) => {
+      while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+      return x;
+    };
+    frontier.forEach((x) => parent.set(x, x));
+    cons.forEach((c) => {
+      const root = find(c.set[0]);
+      c.set.forEach((x) => { const r = find(x); if (r !== root) parent.set(r, root); });
+    });
+
+    const comps = new Map();
+    frontier.forEach((x) => {
+      const r = find(x);
+      if (!comps.has(r)) comps.set(r, { cells: [], cons: [] });
+      comps.get(r).cells.push(x);
+    });
+    cons.forEach((c) => comps.get(find(c.set[0])).cons.push({ cells: c.set, n: c.n }));
+
+    const parts = [];
+    for (const comp of comps.values()) {
+      if (comp.cells.length > FULL_CAP) return false; // too big — the window pass handles it
+      const byTotal = enumerate(comp.cells, comp.cons);
+      if (!byTotal || byTotal.size === 0) return false;
+      parts.push({ cells: comp.cells, byTotal, totals: new Set(byTotal.keys()) });
+    }
+    if (parts.length === 0) return false;
+
+    /* --- global mine counting --- */
+    const outside = [];
+    let provenFlags = 0;
+    for (let i = 0; i < next.length; i++) {
+      if (proven(i)) { provenFlags++; continue; }
+      if (!next[i].revealed && !frontier.has(i)) outside.push(i);
+    }
+    const minesLeft = totalMines == null ? null : totalMines - provenFlags;
+
+    if (minesLeft != null && minesLeft >= 0) {
+      const fits = (T) => minesLeft - T >= 0 && minesLeft - T <= outside.length;
+      const sums = (list) => {
+        let acc = new Set([0]);
+        for (const s of list) {
+          const nx = new Set();
+          acc.forEach((a) => s.forEach((b) => nx.add(a + b)));
+          acc = nx;
+        }
+        return acc;
+      };
+
+      // Drop any component total no combination of the others can support.
+      for (let i = 0; i < parts.length; i++) {
+        const others = sums(parts.filter((_, j) => j !== i).map((p) => p.totals));
+        const keep = new Set();
+        parts[i].totals.forEach((t) => {
+          for (const s of others) if (fits(t + s)) { keep.add(t); break; }
+        });
+        parts[i].totals = keep;
+      }
+
+      const outsideCounts = new Set();
+      sums(parts.map((p) => p.totals)).forEach((T) => { if (fits(T)) outsideCounts.add(minesLeft - T); });
+
+      if (outsideCounts.size === 1 && outside.length > 0) {
+        const m = [...outsideCounts][0];
+        let changed = false;
+        if (m === 0 && sweep) outside.forEach((x) => { if (open(x)) changed = true; });
+        else if (m === outside.length) outside.forEach((x) => { if (flagMine(x)) changed = true; });
+        if (changed) return true;
+      }
+    }
+
+    let changed = false;
+    for (const p of parts) {
+      const { alwaysMine, alwaysSafe } = certainties(p.cells, p.byTotal, [...p.totals]);
+      if (applyCertainties(p.cells, alwaysMine, alwaysSafe)) changed = true;
+    }
+    return changed;
+  };
+
+  /* ---------- Layer 3b: local windows ----------
+     On a real board the frontier is one long connected blob — far too wide to
+     enumerate whole. So don't. Grab a number, pull in its overlapping neighbours
+     until the pocket hits a cell budget, and brute-force just that.
+
+     This is still sound. Dropping constraints only ever ADDS possible
+     arrangements, so anything true across all of them stays true across the
+     full board. It's weaker than the whole-frontier pass, never wrong.
+
+     Three numbers whose sets overlap — a 1 above, a 1 beside, a 3 in the corner —
+     land in one window together, and their combined force falls straight out.   */
+  const windowPass = () => {
+    const cons = allConstraints();
+    if (cons.length < 2) return false;
+
+    const cellToCons = new Map();
+    cons.forEach((c, ci) => c.set.forEach((x) => {
+      if (!cellToCons.has(x)) cellToCons.set(x, []);
+      cellToCons.get(x).push(ci);
+    }));
+
+    const tried = new Set();
+
+    for (let seed = 0; seed < cons.length; seed++) {
+      const inWindow = new Set([seed]);
+      const cellSet = new Set(cons[seed].set);
+      const queue = [seed];
+
+      // Grow outward through shared cells, refusing anything that overflows the budget.
+      while (queue.length) {
+        const ci = queue.shift();
+        for (const x of cons[ci].set) {
+          for (const cj of cellToCons.get(x)) {
+            if (inWindow.has(cj)) continue;
+            const merged = new Set(cellSet);
+            cons[cj].set.forEach((y) => merged.add(y));
+            if (merged.size > WINDOW_CAP) continue;
+            inWindow.add(cj);
+            merged.forEach((y) => cellSet.add(y));
+            queue.push(cj);
+          }
+        }
+      }
+
+      if (inWindow.size < 2) continue;
+
+      const key = [...inWindow].sort((a, b) => a - b).join(",");
+      if (tried.has(key)) continue;
+      tried.add(key);
+
+      const cells = [...cellSet];
+      const byTotal = enumerate(
+        cells,
+        [...inWindow].map((ci) => ({ cells: cons[ci].set, n: cons[ci].n }))
+      );
+      if (!byTotal || byTotal.size === 0) continue;
+
+      const { alwaysMine, alwaysSafe } = certainties(cells, byTotal, [...byTotal.keys()]);
+      if (applyCertainties(cells, alwaysMine, alwaysSafe)) return true; // board moved
+    }
+    return false;
+  };
+
+  /* ---------- drive the layers ---------- */
+  let progress = true;
+  while (progress) {
+    progress = confirmFlags();
+    if (!progress) progress = basicPass();
+    if (!progress && smart) progress = smartPass();
+    if (!progress && smart) progress = fullPass();
+    if (!progress && smart) progress = windowPass();
   }
 
   return { board: next, flagsAdded, opened };
 }
 
-/* ------------------------------------------------------------------
-   The offline solver — Rule 1 plus RULE 2, the completion rule:
-   a number whose mines are all found tells you everything else around it
-   is safe. Together they replay the board from the first click as a
-   perfect logician would.
-
-   Any mine this cannot force could not have been found by deduction. Note
-   it must run from the FIRST CLICK, not the finished board: once you've
-   won, every remaining square is trivially a mine and nothing would ever
-   qualify.
-   ------------------------------------------------------------------ */
+/* ==================================================================
+   The offline solver — still the old two rules. Left alone for now.
+   ================================================================== */
 
 const UNKNOWN = 0;
 const SAFE = 1;
 const MINE = 2;
 
-/** Returns the `known` array: 0 unknown, 1 proven safe, 2 proven mine. */
 export function solveFromFirstClick(board, rows, cols, firstClick) {
   const n = rows * cols;
   const known = new Array(n).fill(UNKNOWN);
@@ -158,7 +526,6 @@ export function solveFromFirstClick(board, rows, cols, firstClick) {
   let changed = true;
   while (changed) {
     changed = false;
-
     for (let i = 0; i < n; i++) {
       if (known[i] !== SAFE || board[i].adj === 0) continue;
 
@@ -168,14 +535,11 @@ export function solveFromFirstClick(board, rows, cols, firstClick) {
 
       const found = ns.filter((x) => known[x] === MINE).length;
 
-      // Rule 1 — everything left must be a mine.
       if (board[i].adj - found === unknown.length) {
         unknown.forEach((x) => { known[x] = MINE; });
         changed = true;
         continue;
       }
-
-      // Rule 2 — all mines accounted for, so the rest is safe.
       if (board[i].adj === found) {
         unknown.forEach(open);
         changed = true;
@@ -186,7 +550,6 @@ export function solveFromFirstClick(board, rows, cols, firstClick) {
   return known;
 }
 
-/** Mines that logic could never force from this opening click. */
 export function findUndeducibleMines(board, rows, cols, firstClick) {
   const known = solveFromFirstClick(board, rows, cols, firstClick);
   const out = new Set();

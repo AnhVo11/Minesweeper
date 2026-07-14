@@ -18,11 +18,19 @@ export const PAYOUT = {
 
 export const BLIND_MULTIPLIER = 2;
 
-// The auto-flag assistant plants every flag logic proves. Convenience costs 5%.
-export const ASSIST_MULTIPLIER = 0.95;
+// The auto-flag assistant plants every flag logic proves.
+export const ASSIST_MULTIPLIER = 0.80;
 
-// Auto-sweep rides on top of auto-flag: it opens what the proven flags make safe.
-export const SWEEP_MULTIPLIER = 0.90;
+// Auto-sweep rides on top: it opens what the proven flags make safe.
+export const SWEEP_MULTIPLIER = 0.65;
+
+// Smart sweep adds set-difference and exact enumeration — a near-complete solver.
+export const SMART_MULTIPLIER = 0.55;
+
+// Once the assistant is opening squares for you, ordinary bombs stop paying.
+// Mines and Broken Arrows bank nothing. Only Unexploded Ordnance survives —
+// it is, by definition, the one thing the solver could not have found for you.
+export const SWEEP_VOIDS_BOMBS = ["mine", "brokenArrow"];
 
 // A mine with at least this many mines touching it is a Broken Arrow.
 export const BROKEN_ARROW_MIN_NEIGHBORS = 6;
@@ -180,28 +188,48 @@ export function collectBombs(board, rows, cols, outcome, firstClick) {
    Scoring one run
    ================================================================== */
 
-export function scoreRun({ board, rows, cols, outcome, blind, assist, sweep, firstClick, mode, time }) {
+export function scoreRun({ board, rows, cols, outcome, blind, assist, sweep, smart, firstClick, mode, time }) {
   const rawCoins = coinsForBoard(board);
   const helping = assist && !blind;
+  const cut =
+    (helping ? 0.20 : 0) +
+    (helping && sweep ? 0.35 : 0) +
+    (helping && sweep && smart ? 0.45 : 0);
+
   const multiplier =
-    PAYOUT[outcome] *
-    (blind ? BLIND_MULTIPLIER : 1) *
-    (helping ? ASSIST_MULTIPLIER : 1) *
-    (helping && sweep ? SWEEP_MULTIPLIER : 1);
+    PAYOUT[outcome] * (blind ? BLIND_MULTIPLIER : 1) * Math.max(0, 1 - cut);
   const coins = Math.floor(rawCoins * multiplier);
+
+  // A plain-language receipt, so the payout is never a mystery.
+  const breakdown = [];
+  if (outcome === "loss") breakdown.push({ label: "Lost the board", amount: `×${PAYOUT.loss}` });
+  if (blind) breakdown.push({ label: "Blind mode", amount: `×${BLIND_MULTIPLIER}`, good: true });
+  if (helping) breakdown.push({ label: "Auto-flag", amount: "−20%" });
+  if (helping && sweep) breakdown.push({ label: "Auto-sweep", amount: "−35%" });
+  if (helping && sweep && smart) breakdown.push({ label: "Smart sweep", amount: "−45%" });
   const bombs = collectBombs(board, rows, cols, outcome, firstClick);
+
+ // Auto-sweep did the finding, so it doesn't count as your find. Remember what
+  // was on the board anyway — the player deserves to see what they lost.
+  const bombsVoided = helping && sweep;
+  const bombsFound = { ...bombs };
+  if (bombsVoided) SWEEP_VOIDS_BOMBS.forEach((k) => { bombs[k] = 0; });
 
   return {
     outcome,
     blind,
     assist,
     sweep,
+    smart,
     mode,
     time,
     rawCoins,
     multiplier,
+    breakdown,
     coins,
     bombs,
+    bombsVoided,
+    bombsFound,
     bombTotal: bombs.mine + bombs.uxo + bombs.brokenArrow,
     safeOpened: board.filter((c) => c.revealed && !c.mine).length,
   };

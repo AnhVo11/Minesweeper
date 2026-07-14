@@ -27,6 +27,7 @@ import {
   BLIND_MULTIPLIER,
   ASSIST_MULTIPLIER,
   SWEEP_MULTIPLIER,
+  SMART_MULTIPLIER,
 } from "./reward";
 
 /* ------------------------------------------------------------------ */
@@ -227,7 +228,13 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, onPress, onLongP
 
       {/* Glyph-free markers — no font can fail to render a shape. */}
       {!cell.revealed && cell.flagged && !wrongFlag && (
-        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: 2, backgroundColor: C.amber }} />
+        <View style={{
+          width: size * 0.5, height: size * 0.5, borderRadius: 2,
+          // solid = the board proved it; hollow = still just your call
+          backgroundColor: cell.auto ? C.amber : "transparent",
+          borderWidth: cell.auto ? 0 : 1.5,
+          borderColor: C.amber,
+        }} />
       )}
       {wrongFlag && (
         <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: 2, backgroundColor: C.red, opacity: 0.5 }} />
@@ -266,6 +273,8 @@ export default function App() {
   const [pendingAssist, setPendingAssist] = useState(true);
   const [sweep, setSweep] = useState(true);
   const [pendingSweep, setPendingSweep] = useState(true);
+  const [smart, setSmart] = useState(false);
+  const [pendingSmart, setPendingSmart] = useState(false);
   const [config, setConfig] = useState({ rows: 9, cols: 9, mines: 10 });
   const [board, setBoard] = useState(() => makeEmptyBoard(9, 9));
   const [firstClick, setFirstClick] = useState(null);
@@ -308,13 +317,14 @@ export default function App() {
   const boardH = rows * cellSize + GAP * (rows - 1);
 
   /* ---------- lifecycle ---------- */
-const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
+const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smartOn) => {
     const base = key === "custom" ? clampCustom(customRaw) : MODES[key];
     
     setModeKey(key);
     setBlind(blindOn);
     setAssist(assistOn);
     setSweep(sweepOn);
+    setSmart(smartOn);
     setConfig({ rows: base.rows, cols: base.cols, mines: base.mines });
     setBoard(makeEmptyBoard(base.rows, base.cols));
     setFirstClick(null);
@@ -338,12 +348,12 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
       Alert.alert("X-ray on", "Every mine is showing. This run banks nothing — restart to play for real.");
     }
   };
-  const restart = () => startGame(modeKey, pendingCustom, blind, assist, sweep);
+  const restart = () => startGame(modeKey, pendingCustom, blind, assist, sweep, smart);
 
-  const openMenu = () => { setPendingMode(modeKey); setPendingAssist(assist); setMenuOpen(true); };
+  const openMenu = () => { setPendingMode(modeKey); setPendingAssist(assist); setMenuOpen(true);setPendingSmart(smart); };
 
   const startFromMenu = () => {
-    startGame(pendingMode, pendingCustom, blind, pendingAssist, pendingSweep);
+   startGame(pendingMode, pendingCustom, blind, pendingAssist, pendingSweep, pendingSmart);
     setMenuOpen(false);
   };
 
@@ -359,7 +369,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
         {
           text: on ? "Restart blind" : "Restart normal",
           style: on ? "destructive" : "default",
-         onPress: () => { startGame(pendingMode, pendingCustom, on, pendingAssist, pendingSweep); setMenuOpen(false); },
+         onPress: () => { startGame(pendingMode, pendingCustom, on, pendingAssist, pendingSweep, pendingSmart); setMenuOpen(false); },
         },
       ]
     );
@@ -377,6 +387,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
       blind,
       assist,
       sweep,
+      smart,
       firstClick: click,
       mode: MODES[modeKey].label,
       time,
@@ -408,7 +419,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
 // The assistant plants every flag Rule 1 proves. It never opens a square —
   // you still choose every dig yourself.
   // Flags what it can prove, then opens what that proves safe — and repeats.
-  const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep).board);
+ const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep, smart, mines).board);
 
   /* ---------- moves ---------- */
   const reveal = (i) => {
@@ -619,36 +630,80 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
               <View style={styles.coinDot} />
               <Text style={styles.payoutCoins}>+{run.coins.toLocaleString()}</Text>
               <Text style={styles.payoutMath}>
-                {run.rawCoins.toLocaleString()} × {run.multiplier}
+                {run.rawCoins.toLocaleString()} earned
               </Text>
             </View>
+
+            {run.breakdown?.length > 0 && (
+              <View style={styles.receipt}>
+                {run.breakdown.map((b) => (
+                  <View key={b.label} style={styles.receiptRow}>
+                    <Text style={styles.receiptLabel}>{b.label}</Text>
+                    <Text style={[styles.receiptAmt, { color: b.good ? C.green : C.red }]}>
+                      {b.amount}
+                    </Text>
+                  </View>
+                ))}
+                <View style={[styles.receiptRow, styles.receiptTotal]}>
+                  <Text style={[styles.receiptLabel, { color: C.text, fontWeight: "800" }]}>
+                    You keep
+                  </Text>
+                  <Text style={[styles.receiptAmt, { color: C.gold, fontWeight: "800" }]}>
+                    {Math.round(run.multiplier * 100)}%
+                  </Text>
+                </View>
+              </View>
+            )}
 
             <View style={styles.summaryGrid}>
               <View style={styles.summaryItem}>
                 <Text style={styles.statLabel}>Safe opened</Text>
                 <Text style={styles.summaryValue}>{run.safeOpened} / {totalSafe}</Text>
               </View>
-              <View style={styles.summaryItem}>
-                <Text style={styles.statLabel}>Mines</Text>
-                <Text style={styles.summaryValue}>{run.bombs.mine}</Text>
+            </View>
+
+            {/* Bomb receipt — what was on the board, and what you actually keep. */}
+            <View style={[styles.receipt, { marginTop: 12 }]}>
+              {[
+                ["mine", "Mines", C.red],
+                ["brokenArrow", "Broken Arrow", C.violet],
+                ["uxo", "Unexploded Ordnance", C.gold],
+              ].map(([key, label, col]) => {
+                const found = run.bombsFound?.[key] ?? 0;
+                const kept = run.bombs[key];
+                const lost = found > 0 && kept === 0;
+                if (found === 0 && kept === 0) return null;
+                return (
+                  <View key={key} style={styles.receiptRow}>
+                    <Text style={[styles.receiptLabel, { color: lost ? C.dim : col }]}>
+                      {label}
+                    </Text>
+                    <Text style={[styles.receiptAmt, { color: lost ? C.red : col }]}>
+                      {lost ? `${found} → 0` : kept}
+                    </Text>
+                  </View>
+                );
+              })}
+
+              <View style={[styles.receiptRow, styles.receiptTotal]}>
+                <Text style={[styles.receiptLabel, { color: C.text, fontWeight: "800" }]}>
+                  Bombs banked
+                </Text>
+                <Text style={[styles.receiptAmt, { color: C.text, fontWeight: "800" }]}>
+                  {run.bombTotal}
+                </Text>
               </View>
-              {run.bombs.brokenArrow > 0 && (
-                <View style={styles.summaryItem}>
-                  <Text style={[styles.statLabel, { color: C.violet }]}>Broken Arrow</Text>
-                  <Text style={[styles.summaryValue, { color: C.violet }]}>{run.bombs.brokenArrow}</Text>
-                </View>
-              )}
-              {run.bombs.uxo > 0 && (
-                <View style={styles.summaryItem}>
-                  <Text style={[styles.statLabel, { color: C.gold }]}>Unexploded Ordnance</Text>
-                  <Text style={[styles.summaryValue, { color: C.gold }]}>{run.bombs.uxo}</Text>
-                </View>
-              )}
             </View>
 
             {run.outcome === "loss" && (
               <Text style={styles.statNote}>
                 Coins cut to {Math.round(PAYOUT.loss * 100)}%. Every bomb downgraded to a plain Mine.
+              </Text>
+            )}
+
+            {run.bombsVoided && (
+              <Text style={styles.statNote}>
+                Auto-sweep found them, not you — Mines and Broken Arrows bank nothing.
               </Text>
             )}
 
@@ -779,12 +834,36 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
                 └ Auto-sweep
               </Text>
               <Text style={styles.blindSub}>
-                Opens squares its own flags prove safe. Never trusts your manual flags.
-                Costs a further {Math.round((1 - SWEEP_MULTIPLIER) * 100)}%.
+                Opens squares its own flags prove safe. Costs a further{" "}
+                {Math.round((1 - SWEEP_MULTIPLIER) * 100)}% — and Mines and Broken Arrows
+                stop paying entirely. Only UXO still banks.
               </Text>
             </View>
             <View style={[styles.switchTrack, { backgroundColor: pendingSweep ? C.green : C.line }]}>
               <View style={[styles.switchKnob, { left: pendingSweep ? 22 : 3 }]} />
+            </View>
+          </Pressable>
+          <Pressable
+            onPress={() => setPendingSmart(!pendingSmart)}
+            disabled={blind || !pendingAssist || !pendingSweep}
+            style={[styles.subBox, {
+              marginLeft: 32,
+              opacity: blind || !pendingAssist || !pendingSweep ? 0.35 : 1,
+              borderColor: pendingSmart ? C.violet : C.line,
+              backgroundColor: pendingSmart ? "#C99CFF12" : C.bg,
+            }]}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.blindTitle, { fontSize: 13, color: pendingSmart ? C.violet : C.text }]}>
+                └ Smart sweep
+              </Text>
+              <Text style={styles.blindSub}>
+              Solves everything except a true 50/50. Costs a further{" "}
+                {Math.round((1 - SMART_MULTIPLIER) * 100)}%.
+              </Text>
+            </View>
+            <View style={[styles.switchTrack, { backgroundColor: pendingSmart ? C.violet : C.line }]}>
+              <View style={[styles.switchKnob, { left: pendingSmart ? 22 : 3 }]} />
             </View>
           </Pressable>
 
@@ -939,6 +1018,11 @@ const styles = StyleSheet.create({
   payoutRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 14 },
   payoutCoins: { color: C.gold, fontSize: 26, fontWeight: "800", fontFamily: MONO },
   payoutMath: { color: C.dim, fontSize: 11, fontFamily: MONO },
+  receipt: { backgroundColor: C.bg, borderRadius: 10, padding: 12, marginBottom: 14 },
+  receiptRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
+  receiptLabel: { color: C.dim, fontSize: 12 },
+  receiptAmt: { fontSize: 12, fontFamily: MONO, fontWeight: "700" },
+  receiptTotal: { borderTopWidth: 1, borderTopColor: C.line, marginTop: 6, paddingTop: 8 },
   summaryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
   summaryItem: { minWidth: 110 },
   summaryValue: { color: C.text, fontSize: 15, fontFamily: MONO, fontWeight: "700", marginTop: 2 },
