@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-
+import { neighborsOf, findUndeducibleMines } from "./deduce";
+export { findUndeducibleMines };
 /* ==================================================================
    TUNING — every balance knob lives here.
    ================================================================== */
@@ -26,24 +27,6 @@ export const BOMB_TYPES = {
   brokenArrow: { key: "brokenArrow", label: "Broken Arrow" },
 };
 
-/* ==================================================================
-   Helpers
-   ================================================================== */
-
-const neighborsOf = (i, rows, cols) => {
-  const r = Math.floor(i / cols);
-  const c = i % cols;
-  const out = [];
-  for (let dr = -1; dr <= 1; dr++) {
-    for (let dc = -1; dc <= 1; dc++) {
-      if (dr === 0 && dc === 0) continue;
-      const nr = r + dr;
-      const nc = c + dc;
-      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) out.push(nr * cols + nc);
-    }
-  }
-  return out;
-};
 
 /* ==================================================================
    Coins
@@ -71,7 +54,7 @@ export const coinsForBoard = (board) =>
    Note this must run from the FIRST CLICK, not the finished board. On a
    won board every safe square is open, so every mine becomes trivially
    deducible and nothing would ever qualify.
-   ================================================================== */
+   
 
 export function findUndeducibleMines(board, rows, cols, firstClick) {
   const n = rows * cols;
@@ -137,6 +120,7 @@ export function findUndeducibleMines(board, rows, cols, firstClick) {
   }
   return undeducible;
 }
+  ================================================================== */
 
 /* ==================================================================
    Bomb classification

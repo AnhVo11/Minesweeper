@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { applyAutoFlags } from "./deduce";
 import {
   View,
   Text,
@@ -295,7 +296,7 @@ export default function App() {
   }, [status]);
 
   /* ---------- sizing: the board always fits the width ---------- */
-  const boardMaxW = Math.min(SCREEN_W, 640) - 28 - 12;
+  const boardMaxW = Math.min(SCREEN_W, 640) - 8 - 6;
   const cellSize = Math.max(6, Math.floor((boardMaxW - GAP * (cols - 1)) / cols));
   const boardW = cols * cellSize + GAP * (cols - 1);
   const boardH = rows * cellSize + GAP * (rows - 1);
@@ -393,6 +394,9 @@ export default function App() {
       ]
     );
   };
+// The assistant plants every flag Rule 1 proves. It never opens a square —
+  // you still choose every dig yourself.
+  const settle = (nb) => (blind ? nb : applyAutoFlags(nb, rows, cols).board);
 
   /* ---------- moves ---------- */
   const reveal = (i) => {
@@ -428,8 +432,10 @@ export default function App() {
         setBoard(nb);
         finish(nb, "loss", click);
       } else {
-        setBoard(nb);
-        if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, "win", click);
+        const done = nb.filter((x) => x.revealed && !x.mine).length === totalSafe;
+        const settled = done ? nb : settle(nb);
+        setBoard(settled);
+        if (done) finish(nb, "win", click);
       }
       return;
     }
@@ -448,8 +454,10 @@ export default function App() {
     }
 
     const nb = floodReveal(b, rows, cols, i);
-    setBoard(nb);
-    if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, "win", click);
+    const done = nb.filter((x) => x.revealed && !x.mine).length === totalSafe;
+    const settled = done ? nb : settle(nb);
+    setBoard(settled);
+    if (done) finish(nb, "win", click);
   };
 
   const toggleFlag = (i) => {
@@ -531,7 +539,7 @@ export default function App() {
         minimumZoomScale={1}
         bouncesZoom
       >
-        <View style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 10, padding: 5 }]}>
+       <View style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 6, padding: 3 }]}>
           <View style={{ width: boardW, height: boardH, flexDirection: "row", flexWrap: "wrap", gap: GAP }}>
             {board.map((cell, i) => (
               <Cell
@@ -808,7 +816,7 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  scroll: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 44 },
+  scroll: { paddingHorizontal: 4, paddingTop: 10, paddingBottom: 44 },
   topBar: {
     paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10,
     backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line,
