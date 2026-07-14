@@ -4,7 +4,6 @@ import {
   Text,
   Pressable,
   ScrollView,
-  TextInput,
   StyleSheet,
   SafeAreaView,
   StatusBar,
@@ -14,6 +13,18 @@ import {
   Alert,
   useWindowDimensions,
 } from "react-native";
+import Slider from "@react-native-community/slider";
+
+import {
+  scoreRun,
+  bankRun,
+  loadProfile,
+  resetProfile,
+  isFlagEarned,
+  EMPTY_PROFILE,
+  PAYOUT,
+  BLIND_MULTIPLIER,
+} from "./reward";
 
 /* ------------------------------------------------------------------ */
 /*  Config                                                             */
@@ -27,7 +38,12 @@ const MODES = {
   custom: { label: "Custom", rows: 12, cols: 12, mines: 24 },
 };
 
-const LIMITS = { minRows: 5, maxRows: 40, minCols: 5, maxCols: 30, minMines: 1, maxMines: 280 };
+const LIMITS = { minRows: 9, maxRows: 40, minCols: 9, maxCols: 30, minMines: 10, maxMines: 280 };
+
+// A board needs breathing room: the first click and its 8 neighbors are always
+// safe, and past ~40% density the board stops being solvable by deduction.
+const maxMinesFor = (r, c) =>
+  Math.max(LIMITS.minMines, Math.min(LIMITS.maxMines, Math.floor(r * c * 0.4), r * c - 10));
 
 const C = {
   bg: "#12151C",
@@ -40,6 +56,8 @@ const C = {
   green: "#5EE6B0",
   amber: "#FFB454",
   red: "#FF5C5C",
+  gold: "#F5D06B",
+  violet: "#C99CFF",
   mineBg: "#3A2430",
 };
 
@@ -108,13 +126,6 @@ function floodReveal(board, rows, cols, start) {
   return next;
 }
 
-/**
- * A flag only earns credit if it was actually deduced — meaning it touches at
- * least one opened safe square. Blanket-flagging the whole board earns nothing.
- */
-const isFlagEarned = (board, i, rows, cols) =>
-  board[i].flagged && nbrs(i, rows, cols).some((n) => board[n].revealed && !board[n].mine);
-
 const countEarnedFlags = (board, rows, cols) =>
   board.reduce((acc, cell, i) => acc + (cell.mine && isFlagEarned(board, i, rows, cols) ? 1 : 0), 0);
 
@@ -132,11 +143,6 @@ const Cell = React.memo(function Cell({ cell, size, over, onPress, onLongPress }
   else if (cell.revealed) bg = C.cellDown;
 
   const isNumber = cell.revealed && !cell.mine && cell.adj > 0;
-  let label = "";
-  if (wrongFlag) label = "✕";
-  else if (cell.flagged) label = "🚩";
-  else if (showMine) label = "💣";
-  else if (isNumber) label = String(cell.adj);
 
   return (
     <Pressable
@@ -155,20 +161,30 @@ const Cell = React.memo(function Cell({ cell, size, over, onPress, onLongPress }
         },
       ]}
     >
-      {label !== "" && (
+      {isNumber && (
         <Text
           allowFontScaling={false}
           style={{
-            fontSize: size * (isNumber ? 0.6 : 0.55),
+            fontSize: size * 0.6,
             lineHeight: size,
             fontWeight: "800",
-            color: wrongFlag ? C.red : isNumber ? NUM_COLORS[cell.adj] : C.text,
-            // emoji don't exist in Menlo — only numbers get the mono face
-            fontFamily: isNumber ? MONO : undefined,
+            color: NUM_COLORS[cell.adj],
+            fontFamily: MONO,
           }}
         >
-          {label}
+          {cell.adj}
         </Text>
+      )}
+
+      {/* Glyph-free markers — no font can fail to render a shape. */}
+      {!cell.revealed && cell.flagged && !wrongFlag && (
+        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: 2, backgroundColor: C.amber }} />
+      )}
+      {wrongFlag && (
+        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: 2, backgroundColor: C.red, opacity: 0.5 }} />
+      )}
+      {showMine && (
+        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: size, backgroundColor: cell.exploded ? "#12151C" : C.red }} />
       )}
     </Pressable>
   );
@@ -178,33 +194,35 @@ const Cell = React.memo(function Cell({ cell, size, over, onPress, onLongPress }
 /*  App                                                                */
 /* ------------------------------------------------------------------ */
 
-const strFrom = (o) => ({ rows: String(o.rows), cols: String(o.cols), mines: String(o.mines) });
-
 const clampCustom = (raw) => {
-  const r = Math.max(LIMITS.minRows, Math.min(LIMITS.maxRows, parseInt(raw.rows, 10) || 12));
-  const c = Math.max(LIMITS.minCols, Math.min(LIMITS.maxCols, parseInt(raw.cols, 10) || 12));
-  const m = Math.max(LIMITS.minMines, Math.min(LIMITS.maxMines, r * c - 10, parseInt(raw.mines, 10) || 10));
+  const r = Math.max(LIMITS.minRows, Math.min(LIMITS.maxRows, raw.rows));
+  const c = Math.max(LIMITS.minCols, Math.min(LIMITS.maxCols, raw.cols));
+  const m = Math.max(LIMITS.minMines, Math.min(maxMinesFor(r, c), raw.mines));
   return { rows: r, cols: c, mines: m };
 };
 
 export default function App() {
-  const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
+  const { width: SCREEN_W } = useWindowDimensions();
 
   // live game
   const [modeKey, setModeKey] = useState("easy");
   const [blind, setBlind] = useState(false);
   const [config, setConfig] = useState({ rows: 9, cols: 9, mines: 10 });
   const [board, setBoard] = useState(() => makeEmptyBoard(9, 9));
-  const [minesPlaced, setMinesPlaced] = useState(false);
-  const [status, setStatus] = useState("idle"); // idle | playing | won | lost
+  const [firstClick, setFirstClick] = useState(null);
+  const [status, setStatus] = useState("idle"); // idle | playing | won | lost | surrendered
   const [flagMode, setFlagMode] = useState(false);
   const [time, setTime] = useState(0);
-  const [summary, setSummary] = useState(null);
+  const [run, setRun] = useState(null); // scored result of the finished game
+
+  // profile
+  const [profile, setProfile] = useState(EMPTY_PROFILE);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   // menu — selections stay pending until Start
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingMode, setPendingMode] = useState("easy");
-  const [pendingCustom, setPendingCustom] = useState({ rows: "12", cols: "12", mines: "24" });
+  const [pendingCustom, setPendingCustom] = useState({ rows: 12, cols: 12, mines: 24 });
 
   const { rows, cols, mines } = config;
   const totalSafe = rows * cols - mines;
@@ -213,13 +231,15 @@ export default function App() {
   const active = status === "idle" || status === "playing";
   const accent = blind ? C.amber : C.green;
 
+  useEffect(() => { loadProfile().then(setProfile); }, []);
+
   useEffect(() => {
     if (status !== "playing") return;
     const id = setInterval(() => setTime((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [status]);
 
-  /* ---------- sizing: the whole board always fits the screen ---------- */
+  /* ---------- sizing: the board always fits the width ---------- */
   const boardMaxW = Math.min(SCREEN_W, 640) - 28 - 12;
   const cellSize = Math.max(6, Math.floor((boardMaxW - GAP * (cols - 1)) / cols));
   const boardW = cols * cellSize + GAP * (cols - 1);
@@ -228,81 +248,88 @@ export default function App() {
   /* ---------- lifecycle ---------- */
   const startGame = useCallback((key, customRaw, blindOn) => {
     const base = key === "custom" ? clampCustom(customRaw) : MODES[key];
-    const r = base.rows;
-    const c = base.cols;
-    const m = Math.min(base.mines, r * c - 10);
     setModeKey(key);
     setBlind(blindOn);
-    setConfig({ rows: r, cols: c, mines: m });
-    setBoard(makeEmptyBoard(r, c));
-    setMinesPlaced(false);
+    setConfig({ rows: base.rows, cols: base.cols, mines: base.mines });
+    setBoard(makeEmptyBoard(base.rows, base.cols));
+    setFirstClick(null);
     setStatus("idle");
     setFlagMode(false);
     setTime(0);
-    setSummary(null);
+    setRun(null);
   }, []);
 
   const restart = () => startGame(modeKey, pendingCustom, blind);
 
-  const openMenu = () => {
-    setPendingMode(modeKey);
-    setMenuOpen(true);
-  };
+  const openMenu = () => { setPendingMode(modeKey); setMenuOpen(true); };
 
   const startFromMenu = () => {
-    const raw = pendingMode === "custom" ? strFrom(clampCustom(pendingCustom)) : pendingCustom;
-    if (pendingMode === "custom") setPendingCustom(raw);
-    startGame(pendingMode, raw, blind);
+    startGame(pendingMode, pendingCustom, blind);
     setMenuOpen(false);
   };
 
   const askBlind = () => {
-    const turningOn = !blind;
+    const on = !blind;
     Alert.alert(
-      turningOn ? "Turn on blind mode?" : "Turn off blind mode?",
-      turningOn
-        ? "Flags are disabled — you dig only. This restarts the current game, and blind runs pay a better reward."
+      on ? "Turn on blind mode?" : "Turn off blind mode?",
+      on
+        ? `Flags are disabled — you dig only. This restarts the current game, and coins pay ${BLIND_MULTIPLIER}x.`
         : "Flags come back. This restarts the current game and you lose the blind bonus.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: turningOn ? "Restart blind" : "Restart normal",
-          style: turningOn ? "destructive" : "default",
-          onPress: () => {
-            const raw = pendingMode === "custom" ? strFrom(clampCustom(pendingCustom)) : pendingCustom;
-            startGame(pendingMode, raw, turningOn);
-            setMenuOpen(false);
-          },
+          text: on ? "Restart blind" : "Restart normal",
+          style: on ? "destructive" : "default",
+          onPress: () => { startGame(pendingMode, pendingCustom, on); setMenuOpen(false); },
         },
       ]
     );
   };
 
-  /* ---------- moves ---------- */
-  const finish = (finalBoard, won) => {
-    setStatus(won ? "won" : "lost");
-    setSummary({
-      won,
-      opened: finalBoard.filter((c) => c.revealed && !c.mine).length,
-      totalSafe,
-      earnedFlags: countEarnedFlags(finalBoard, rows, cols),
-      mineFlags: finalBoard.filter((c) => c.flagged && c.mine).length,
-      wrongFlags: finalBoard.filter((c) => c.flagged && !c.mine).length,
-      time,
+  /* ---------- finishing a run ---------- */
+  const finish = async (finalBoard, outcome, click) => {
+    setStatus(outcome === "win" ? "won" : outcome === "surrender" ? "surrendered" : "lost");
+
+    const scored = scoreRun({
+      board: finalBoard,
+      rows,
+      cols,
+      outcome,
       blind,
+      firstClick: click,
       mode: MODES[modeKey].label,
-      mines,
+      time,
     });
-    Vibration.vibrate(won ? [0, 40, 60, 40] : 200);
+
+    setRun(scored);
+    Vibration.vibrate(outcome === "loss" ? 200 : [0, 40, 60, 40]);
+
+    const next = await bankRun(profile, scored, modeKey);
+    setProfile(next);
   };
 
+  const askSurrender = () => {
+    if (status !== "playing") return;
+    Alert.alert(
+      "Bank what you have?",
+      `Surrender keeps 100% of your coins and every mine you correctly flagged — specials included. Play on and a wrong dig costs you ${Math.round((1 - PAYOUT.loss) * 100)}% of the coins, and your bombs all downgrade to plain Mines.`,
+      [
+        { text: "Keep digging", style: "cancel" },
+        { text: "Surrender", onPress: () => finish(board, "surrender", firstClick) },
+      ]
+    );
+  };
+
+  /* ---------- moves ---------- */
   const reveal = (i) => {
     if (!active) return;
     let b = board;
+    let click = firstClick;
 
-    if (!minesPlaced) {
+    if (click === null) {
       b = placeMines(b, rows, cols, mines, i);
-      setMinesPlaced(true);
+      click = i;
+      setFirstClick(i);
       setStatus("playing");
     }
 
@@ -325,10 +352,10 @@ export default function App() {
       if (boom) {
         nb = nb.map((x) => (x.mine ? { ...x, revealed: true } : x));
         setBoard(nb);
-        finish(nb, false);
+        finish(nb, "loss", click);
       } else {
         setBoard(nb);
-        if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, true);
+        if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, "win", click);
       }
       return;
     }
@@ -342,13 +369,13 @@ export default function App() {
         exploded: idx === i,
       }));
       setBoard(nb);
-      finish(nb, false);
+      finish(nb, "loss", click);
       return;
     }
 
     const nb = floodReveal(b, rows, cols, i);
     setBoard(nb);
-    if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, true);
+    if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, "win", click);
   };
 
   const toggleFlag = (i) => {
@@ -363,25 +390,28 @@ export default function App() {
   const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   const progress = totalSafe ? safeOpened / totalSafe : 0;
   const liveEarned = countEarnedFlags(board, rows, cols);
+  const face = status === "lost" ? ":(" : status === "won" ? ":D" : status === "surrendered" ? ":|" : ":)";
 
   /* ---------- render ---------- */
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      <View style={styles.topBar}>
 
-        {/* Header */}
+      <View style={styles.topBar}>
         <View style={styles.header}>
           <Text style={styles.title}>
             MINE<Text style={{ color: accent }}>SWEEP</Text>
           </Text>
-          <Text style={styles.headerMeta}>
-            {MODES[modeKey].label}{blind ? " · Blind" : ""} · {rows}×{cols} · {mines}
-          </Text>
+          <Pressable onPress={() => setProfileOpen(true)} hitSlop={10} style={styles.wallet}>
+            <View style={styles.coinDot} />
+            <Text style={styles.walletText}>{profile.coins.toLocaleString()}</Text>
+            <View style={[styles.mineDot, { marginLeft: 10 }]} />
+            <Text style={styles.walletText}>
+              {profile.bombs.mine + profile.bombs.uxo + profile.bombs.brokenArrow}
+            </Text>
+          </Pressable>
         </View>
 
-        {/* Status bar — the smiley opens the menu */}
-        {/* Fixed top bar */}
         <View style={styles.statusBar}>
           <View style={styles.statusSide}>
             <View style={styles.mineDot} />
@@ -392,7 +422,7 @@ export default function App() {
                 hitSlop={10}
                 style={[styles.flagBtn, { borderColor: flagMode ? accent : C.line, backgroundColor: flagMode ? accent + "22" : "transparent" }]}
               >
-                <Text style={[styles.flagBtnText, { color: flagMode ? accent : C.dim }]}>F</Text>
+                <View style={[styles.flagSwatch, { backgroundColor: flagMode ? accent : C.dim }]} />
               </Pressable>
             )}
           </View>
@@ -402,9 +432,7 @@ export default function App() {
               <Text style={styles.restart}>↻</Text>
             </Pressable>
             <Pressable onPress={openMenu} hitSlop={12} style={[styles.menuBtn, { borderColor: accent }]}>
-              <Text style={styles.face}>
-                {status === "lost" ? ":(" : status === "won" ? ":D" : ":)"}
-              </Text>
+              <Text style={styles.face}>{face}</Text>
             </Pressable>
           </View>
 
@@ -421,10 +449,7 @@ export default function App() {
         minimumZoomScale={1}
         bouncesZoom
       >
-        {/* Board — always fits the width; pinch to zoom in */}
-        <View
-          style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 10, padding: 5 }]}
-        >
+        <View style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 10, padding: 5 }]}>
           <View style={{ width: boardW, height: boardH, flexDirection: "row", flexWrap: "wrap", gap: GAP }}>
             {board.map((cell, i) => (
               <Cell
@@ -441,12 +466,18 @@ export default function App() {
 
         <Text style={styles.hint}>
           {blind
-            ? "Blind mode — dig only, no flags. Pinch to zoom in."
-            : "Tap to dig · long-press to flag · pinch to zoom in"}
+            ? `Blind — dig only. Coins pay ${BLIND_MULTIPLIER}x.`
+            : "Tap to dig · long-press to flag · pinch to zoom"}
         </Text>
 
+        {/* Surrender */}
+        {status === "playing" && (
+          <Pressable onPress={askSurrender} style={styles.surrenderBtn}>
+            <Text style={styles.surrenderText}>Surrender & bank</Text>
+          </Pressable>
+        )}
 
-        {/* Stats — below the grid */}
+        {/* Live stats */}
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
             <Text style={styles.statLabel}>Safe squares opened</Text>
@@ -471,46 +502,52 @@ export default function App() {
           )}
         </View>
 
-        {/* Game over */}
-        {summary && (
-          <View style={[styles.summary, { borderColor: summary.won ? accent : C.red }]}>
-            <Text style={[styles.summaryTitle, { color: summary.won ? accent : C.red }]}>
-              {summary.won ? "✓ Board cleared" : "✗ Boom"}
+        {/* Result */}
+        {run && (
+          <View style={[styles.summary, { borderColor: run.outcome === "loss" ? C.red : accent }]}>
+            <Text style={[styles.summaryTitle, { color: run.outcome === "loss" ? C.red : accent }]}>
+              {run.outcome === "win" ? "Board cleared" : run.outcome === "surrender" ? "Banked" : "Boom"}
               <Text style={styles.summaryMeta}>
-                {"   "}{summary.mode}{summary.blind ? " · Blind" : ""} · {fmt(summary.time)}
+                {"   "}{run.mode}{run.blind ? " · Blind" : ""} · {fmt(run.time)}
               </Text>
             </Text>
+
+            <View style={styles.payoutRow}>
+              <View style={styles.coinDot} />
+              <Text style={styles.payoutCoins}>+{run.coins.toLocaleString()}</Text>
+              <Text style={styles.payoutMath}>
+                {run.rawCoins.toLocaleString()} × {run.multiplier}
+              </Text>
+            </View>
 
             <View style={styles.summaryGrid}>
               <View style={styles.summaryItem}>
                 <Text style={styles.statLabel}>Safe opened</Text>
-                <Text style={styles.summaryValue}>{summary.opened} / {summary.totalSafe}</Text>
+                <Text style={styles.summaryValue}>{run.safeOpened} / {totalSafe}</Text>
               </View>
-
-              {!summary.blind ? (
-                <>
-                  <View style={styles.summaryItem}>
-                    <Text style={styles.statLabel}>Mines correctly pinged</Text>
-                    <Text style={styles.summaryValue}>{summary.earnedFlags} / {summary.mines}</Text>
-                  </View>
-                  <View style={styles.summaryItem}>
-                    <Text style={styles.statLabel}>Wrong flags</Text>
-                    <Text style={styles.summaryValue}>{summary.wrongFlags}</Text>
-                  </View>
-                  {summary.mineFlags > summary.earnedFlags && (
-                    <View style={styles.summaryItem}>
-                      <Text style={styles.statLabel}>Guessed flags (no credit)</Text>
-                      <Text style={styles.summaryValue}>{summary.mineFlags - summary.earnedFlags}</Text>
-                    </View>
-                  )}
-                </>
-              ) : (
+              <View style={styles.summaryItem}>
+                <Text style={styles.statLabel}>Mines</Text>
+                <Text style={styles.summaryValue}>{run.bombs.mine}</Text>
+              </View>
+              {run.bombs.brokenArrow > 0 && (
                 <View style={styles.summaryItem}>
-                  <Text style={[styles.statLabel, { color: C.amber }]}>Blind bonus</Text>
-                  <Text style={styles.summaryValue}>Eligible ✦</Text>
+                  <Text style={[styles.statLabel, { color: C.violet }]}>Broken Arrow</Text>
+                  <Text style={[styles.summaryValue, { color: C.violet }]}>{run.bombs.brokenArrow}</Text>
+                </View>
+              )}
+              {run.bombs.uxo > 0 && (
+                <View style={styles.summaryItem}>
+                  <Text style={[styles.statLabel, { color: C.gold }]}>Unexploded Ordnance</Text>
+                  <Text style={[styles.summaryValue, { color: C.gold }]}>{run.bombs.uxo}</Text>
                 </View>
               )}
             </View>
+
+            {run.outcome === "loss" && (
+              <Text style={styles.statNote}>
+                Coins cut to {Math.round(PAYOUT.loss * 100)}%. Every bomb downgraded to a plain Mine.
+              </Text>
+            )}
 
             <Pressable onPress={restart} style={[styles.primaryBtn, { backgroundColor: accent }]}>
               <Text style={styles.primaryText}>Play again</Text>
@@ -519,7 +556,7 @@ export default function App() {
         )}
       </ScrollView>
 
-      {/* ---------------- Menu sheet ---------------- */}
+      {/* ---------------- New game sheet ---------------- */}
       <Modal visible={menuOpen} transparent animationType="slide" onRequestClose={() => setMenuOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setMenuOpen(false)} />
         <View style={styles.sheet}>
@@ -544,21 +581,46 @@ export default function App() {
             })}
           </View>
 
-          {pendingMode === "custom" && (
-            <View style={styles.customBox}>
-              {[["rows", "Rows 5–40"], ["cols", "Cols 5–30"], ["mines", "Mines 1–280"]].map(([k, label]) => (
-                <View key={k} style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>{label}</Text>
-                  <TextInput
-                    value={pendingCustom[k]}
-                    onChangeText={(v) => setPendingCustom({ ...pendingCustom, [k]: v.replace(/[^0-9]/g, "") })}
-                    keyboardType="number-pad"
-                    style={styles.input}
-                  />
-                </View>
-              ))}
-            </View>
-          )}
+          {pendingMode === "custom" && (() => {
+            const mineCap = maxMinesFor(pendingCustom.rows, pendingCustom.cols);
+            const density = Math.round((pendingCustom.mines / (pendingCustom.rows * pendingCustom.cols)) * 100);
+            const setDim = (k, v) => {
+              const next = { ...pendingCustom, [k]: v };
+              next.mines = Math.min(next.mines, maxMinesFor(next.rows, next.cols));
+              setPendingCustom(next);
+            };
+            return (
+              <View style={styles.customBox}>
+                {[
+                  ["rows", "Rows", LIMITS.minRows, LIMITS.maxRows],
+                  ["cols", "Columns", LIMITS.minCols, LIMITS.maxCols],
+                  ["mines", "Mines", LIMITS.minMines, mineCap],
+                ].map(([k, label, min, max]) => (
+                  <View key={k} style={styles.sliderRow}>
+                    <View style={styles.sliderHead}>
+                      <Text style={styles.inputLabel}>{label}</Text>
+                      <Text style={styles.sliderValue}>{pendingCustom[k]}</Text>
+                    </View>
+                    <Slider
+                      minimumValue={min}
+                      maximumValue={max}
+                      step={1}
+                      value={pendingCustom[k]}
+                      onValueChange={(v) => setDim(k, Math.round(v))}
+                      minimumTrackTintColor={accent}
+                      maximumTrackTintColor={C.line}
+                      thumbTintColor={accent}
+                    />
+                    <Text style={styles.sliderRange}>{min} – {max}</Text>
+                  </View>
+                ))}
+                <Text style={styles.statNote}>
+                  {pendingCustom.rows * pendingCustom.cols} squares · {density}% mine density
+                  {density > 25 ? " — brutal" : density < 12 ? " — gentle" : ""}
+                </Text>
+              </View>
+            );
+          })()}
 
           <Pressable
             onPress={askBlind}
@@ -568,7 +630,7 @@ export default function App() {
               <Text style={[styles.blindTitle, { color: blind ? C.amber : C.text }]}>
                 {blind ? "Blind mode ON" : "Blind mode OFF"}
               </Text>
-              <Text style={styles.blindSub}>No flags — dig only. Pays a better reward.</Text>
+              <Text style={styles.blindSub}>No flags — dig only. Coins pay {BLIND_MULTIPLIER}x.</Text>
             </View>
             <View style={[styles.switchTrack, { backgroundColor: blind ? C.amber : C.line }]}>
               <View style={[styles.switchKnob, { left: blind ? 22 : 3 }]} />
@@ -584,6 +646,77 @@ export default function App() {
           </Pressable>
         </View>
       </Modal>
+
+      {/* ---------------- Profile sheet ---------------- */}
+      <Modal visible={profileOpen} transparent animationType="slide" onRequestClose={() => setProfileOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setProfileOpen(false)} />
+        <View style={styles.sheet}>
+          <View style={styles.grabber} />
+          <Text style={styles.sheetTitle}>Profile</Text>
+
+          <View style={styles.walletBig}>
+            <View style={styles.coinDot} />
+            <Text style={styles.walletBigText}>{profile.coins.toLocaleString()}</Text>
+            <Text style={styles.walletBigLabel}>coins</Text>
+          </View>
+
+          <View style={styles.statsRow}>
+            {[
+              ["Mines", profile.bombs.mine, C.red],
+              ["Broken Arrow", profile.bombs.brokenArrow, C.violet],
+              ["Unexploded Ordnance", profile.bombs.uxo, C.gold],
+            ].map(([label, n, col]) => (
+              <View key={label} style={styles.statCard}>
+                <Text style={[styles.statLabel, { color: col }]}>{label}</Text>
+                <Text style={[styles.statValue, { color: col }]}>{n}</Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={[styles.statsRow, { marginTop: 8 }]}>
+            <View style={styles.statCard}>
+              <Text style={styles.statLabel}>Games</Text>
+              <Text style={styles.statValue}>{profile.games}</Text>
+            </View>
+            <View style={styles.statCard}>
+              <Text style={styles.statLabel}>Won</Text>
+              <Text style={styles.statValue}>{profile.wins}</Text>
+            </View>
+            <View style={styles.statCard}>
+              <Text style={styles.statLabel}>Banked</Text>
+              <Text style={styles.statValue}>{profile.surrenders}</Text>
+            </View>
+          </View>
+
+          {Object.keys(profile.bestTime).length > 0 && (
+            <View style={{ marginTop: 14 }}>
+              <Text style={styles.statLabel}>Best times</Text>
+              {Object.entries(profile.bestTime).map(([k, t]) => (
+                <View key={k} style={styles.bestRow}>
+                  <Text style={styles.bestMode}>{MODES[k]?.label || k}</Text>
+                  <Text style={styles.bestTime}>{fmt(t)}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          <Pressable
+            onPress={() =>
+              Alert.alert("Reset profile?", "Coins, bombs, and best times are all erased. This cannot be undone.", [
+                { text: "Cancel", style: "cancel" },
+                { text: "Erase", style: "destructive", onPress: () => resetProfile().then(setProfile) },
+              ])
+            }
+            style={styles.ghostBtn}
+          >
+            <Text style={[styles.ghostText, { color: C.red }]}>Reset profile</Text>
+          </Pressable>
+
+          <Pressable onPress={() => setProfileOpen(false)} style={[styles.primaryBtn, { backgroundColor: accent, marginTop: 0 }]}>
+            <Text style={styles.primaryText}>Close</Text>
+          </Pressable>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -592,27 +725,34 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
- scroll: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 44 },
-  topBar: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line },
-  mineDot: { width: 11, height: 11, borderRadius: 6, backgroundColor: C.red },
-  flagBtn: { width: 26, height: 26, borderRadius: 8, borderWidth: 1, alignItems: "center", justifyContent: "center", marginLeft: 4 },
-  flagBtnText: { fontSize: 13, fontWeight: "800" },
-  face: { fontSize: 17, fontWeight: "800", color: C.text, fontFamily: MONO },
+  scroll: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 44 },
+  topBar: {
+    paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10,
+    backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line,
+  },
 
-  header: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
   title: { color: C.text, fontSize: 22, fontWeight: "800", letterSpacing: 1 },
-  headerMeta: { color: C.dim, fontSize: 11, fontFamily: MONO },
+  wallet: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    backgroundColor: C.panel, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6,
+  },
+  walletText: { color: C.text, fontSize: 13, fontWeight: "800", fontFamily: MONO },
+  coinDot: { width: 11, height: 11, borderRadius: 6, backgroundColor: C.gold },
+  mineDot: { width: 11, height: 11, borderRadius: 6, backgroundColor: C.red },
 
   statusBar: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    backgroundColor: C.panel, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 14, marginBottom: 10,
+    backgroundColor: C.panel, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 14,
   },
-  statusSide: { flexDirection: "row", alignItems: "center", gap: 6, width: 80 },
+  statusSide: { flexDirection: "row", alignItems: "center", gap: 6, width: 90 },
   statusCenter: { flexDirection: "row", alignItems: "center", gap: 18 },
-  emoji: { fontSize: 15 },
   statusText: { color: C.text, fontSize: 15, fontFamily: MONO, fontWeight: "700" },
   restart: { color: C.dim, fontSize: 24, fontWeight: "700" },
   menuBtn: { borderWidth: 1, borderRadius: 20, paddingHorizontal: 9, paddingVertical: 3 },
+  face: { fontSize: 17, fontWeight: "800", color: C.text, fontFamily: MONO },
+  flagBtn: { width: 26, height: 26, borderRadius: 8, borderWidth: 1, alignItems: "center", justifyContent: "center", marginLeft: 4 },
+  flagSwatch: { width: 11, height: 11, borderRadius: 2 },
 
   boardFrame: {
     backgroundColor: C.panel, borderRadius: 14, borderWidth: 1,
@@ -622,25 +762,30 @@ const styles = StyleSheet.create({
 
   hint: { color: C.dim, fontSize: 11, textAlign: "center", marginTop: 10, marginBottom: 10 },
 
-  toolRow: { flexDirection: "row", gap: 6, marginBottom: 10 },
-  toolBtn: { flex: 1, alignItems: "center", paddingVertical: 11, borderRadius: 10, borderWidth: 1 },
-  toolText: { fontSize: 13, fontWeight: "800" },
+  surrenderBtn: {
+    borderWidth: 1, borderColor: C.line, borderRadius: 10,
+    paddingVertical: 11, alignItems: "center", marginBottom: 10,
+  },
+  surrenderText: { color: C.gold, fontSize: 13, fontWeight: "800" },
 
   statsRow: { flexDirection: "row", gap: 8 },
   statCard: { flex: 1, backgroundColor: C.panel, borderRadius: 12, padding: 12 },
   statLabel: { color: C.dim, fontSize: 11 },
   statValue: { color: C.text, fontSize: 20, fontWeight: "800", fontFamily: MONO, marginTop: 2 },
   statSub: { color: C.dim, fontSize: 12, fontWeight: "400" },
-  statNote: { color: C.dim, fontSize: 10, marginTop: 6, lineHeight: 13 },
+  statNote: { color: C.dim, fontSize: 10, marginTop: 8, lineHeight: 13 },
   barTrack: { height: 4, backgroundColor: C.line, borderRadius: 2, marginTop: 8, overflow: "hidden" },
   barFill: { height: 4, borderRadius: 2 },
 
   summary: { marginTop: 12, backgroundColor: C.panel, borderWidth: 1, borderRadius: 14, padding: 16 },
   summaryTitle: { fontSize: 16, fontWeight: "800", marginBottom: 12 },
   summaryMeta: { color: C.dim, fontSize: 12, fontWeight: "400" },
+  payoutRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 14 },
+  payoutCoins: { color: C.gold, fontSize: 26, fontWeight: "800", fontFamily: MONO },
+  payoutMath: { color: C.dim, fontSize: 11, fontFamily: MONO },
   summaryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
-  summaryItem: { minWidth: 120 },
-  summaryValue: { color: C.text, fontSize: 14, fontFamily: MONO, fontWeight: "700", marginTop: 2 },
+  summaryItem: { minWidth: 110 },
+  summaryValue: { color: C.text, fontSize: 15, fontFamily: MONO, fontWeight: "700", marginTop: 2 },
 
   primaryBtn: { marginTop: 14, paddingVertical: 13, borderRadius: 10, alignItems: "center" },
   primaryText: { color: C.bg, fontWeight: "800", fontSize: 15 },
@@ -655,17 +800,31 @@ const styles = StyleSheet.create({
   grabber: { width: 38, height: 4, borderRadius: 2, backgroundColor: C.line, alignSelf: "center", marginBottom: 14 },
   sheetTitle: { color: C.text, fontSize: 18, fontWeight: "800", marginBottom: 12 },
 
+  walletBig: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: C.bg, borderRadius: 12, padding: 14, marginBottom: 10,
+  },
+  walletBigText: { color: C.gold, fontSize: 28, fontWeight: "800", fontFamily: MONO },
+  walletBigLabel: { color: C.dim, fontSize: 12 },
+
+  bestRow: {
+    flexDirection: "row", justifyContent: "space-between",
+    paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.line,
+  },
+  bestMode: { color: C.text, fontSize: 13, fontWeight: "600" },
+  bestTime: { color: C.dim, fontSize: 13, fontFamily: MONO },
+
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
   chip: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, minWidth: 104 },
   chipText: { fontSize: 14, fontWeight: "700" },
   chipSize: { color: C.dim, fontSize: 10, fontFamily: MONO, marginTop: 2 },
 
-  customBox: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  customBox: { marginBottom: 12 },
+  sliderRow: { marginBottom: 6 },
+  sliderHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline" },
   inputLabel: { color: C.dim, fontSize: 11, marginBottom: 4 },
-  input: {
-    borderWidth: 1, borderColor: C.line, backgroundColor: C.bg, color: C.text,
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 9, fontSize: 15,
-  },
+  sliderValue: { color: C.text, fontSize: 16, fontWeight: "800", fontFamily: MONO },
+  sliderRange: { color: C.dim, fontSize: 10, fontFamily: MONO, textAlign: "right", marginTop: -4 },
 
   blindBox: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 12, padding: 14 },
   blindTitle: { fontSize: 14, fontWeight: "800" },
