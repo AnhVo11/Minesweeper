@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { applyAutoFlags } from "./deduce";
+import { applyAssist } from "./deduce";
 import {
   View,
   Text,
@@ -25,6 +25,8 @@ import {
   EMPTY_PROFILE,
   PAYOUT,
   BLIND_MULTIPLIER,
+  ASSIST_MULTIPLIER,
+  SWEEP_MULTIPLIER,
 } from "./reward";
 
 /* ------------------------------------------------------------------ */
@@ -260,6 +262,10 @@ export default function App() {
   // live game
   const [modeKey, setModeKey] = useState("easy");
   const [blind, setBlind] = useState(false);
+  const [assist, setAssist] = useState(true);
+  const [pendingAssist, setPendingAssist] = useState(true);
+  const [sweep, setSweep] = useState(true);
+  const [pendingSweep, setPendingSweep] = useState(true);
   const [config, setConfig] = useState({ rows: 9, cols: 9, mines: 10 });
   const [board, setBoard] = useState(() => makeEmptyBoard(9, 9));
   const [firstClick, setFirstClick] = useState(null);
@@ -302,10 +308,13 @@ export default function App() {
   const boardH = rows * cellSize + GAP * (rows - 1);
 
   /* ---------- lifecycle ---------- */
-  const startGame = useCallback((key, customRaw, blindOn) => {
+const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn) => {
     const base = key === "custom" ? clampCustom(customRaw) : MODES[key];
+    
     setModeKey(key);
     setBlind(blindOn);
+    setAssist(assistOn);
+    setSweep(sweepOn);
     setConfig({ rows: base.rows, cols: base.cols, mines: base.mines });
     setBoard(makeEmptyBoard(base.rows, base.cols));
     setFirstClick(null);
@@ -329,12 +338,12 @@ export default function App() {
       Alert.alert("X-ray on", "Every mine is showing. This run banks nothing — restart to play for real.");
     }
   };
-  const restart = () => startGame(modeKey, pendingCustom, blind);
+  const restart = () => startGame(modeKey, pendingCustom, blind, assist, sweep);
 
-  const openMenu = () => { setPendingMode(modeKey); setMenuOpen(true); };
+  const openMenu = () => { setPendingMode(modeKey); setPendingAssist(assist); setMenuOpen(true); };
 
   const startFromMenu = () => {
-    startGame(pendingMode, pendingCustom, blind);
+    startGame(pendingMode, pendingCustom, blind, pendingAssist, pendingSweep);
     setMenuOpen(false);
   };
 
@@ -350,7 +359,7 @@ export default function App() {
         {
           text: on ? "Restart blind" : "Restart normal",
           style: on ? "destructive" : "default",
-          onPress: () => { startGame(pendingMode, pendingCustom, on); setMenuOpen(false); },
+         onPress: () => { startGame(pendingMode, pendingCustom, on, pendingAssist, pendingSweep); setMenuOpen(false); },
         },
       ]
     );
@@ -366,6 +375,8 @@ export default function App() {
       cols,
       outcome,
       blind,
+      assist,
+      sweep,
       firstClick: click,
       mode: MODES[modeKey].label,
       time,
@@ -396,7 +407,8 @@ export default function App() {
   };
 // The assistant plants every flag Rule 1 proves. It never opens a square —
   // you still choose every dig yourself.
-  const settle = (nb) => (blind ? nb : applyAutoFlags(nb, rows, cols).board);
+  // Flags what it can prove, then opens what that proves safe — and repeats.
+  const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep).board);
 
   /* ---------- moves ---------- */
   const reveal = (i) => {
@@ -432,10 +444,9 @@ export default function App() {
         setBoard(nb);
         finish(nb, "loss", click);
       } else {
-        const done = nb.filter((x) => x.revealed && !x.mine).length === totalSafe;
-        const settled = done ? nb : settle(nb);
+        const settled = settle(nb);
         setBoard(settled);
-        if (done) finish(nb, "win", click);
+        if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
       }
       return;
     }
@@ -454,10 +465,9 @@ export default function App() {
     }
 
     const nb = floodReveal(b, rows, cols, i);
-    const done = nb.filter((x) => x.revealed && !x.mine).length === totalSafe;
-    const settled = done ? nb : settle(nb);
+    const settled = settle(nb);
     setBoard(settled);
-    if (done) finish(nb, "win", click);
+    if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
   };
 
   const toggleFlag = (i) => {
@@ -558,7 +568,9 @@ export default function App() {
         <Text style={styles.hint}>
           {blind
             ? `Blind — dig only. Coins pay ${BLIND_MULTIPLIER}x.`
-            : "Tap to dig · long-press to flag · pinch to zoom"}
+            : assist
+              ? "Assistant on · tap to dig · pinch to zoom"
+              : "Tap to dig · long-press to flag · pinch to zoom"}
         </Text>
 
         {/* Surrender */}
@@ -725,6 +737,54 @@ export default function App() {
             </View>
             <View style={[styles.switchTrack, { backgroundColor: blind ? C.amber : C.line }]}>
               <View style={[styles.switchKnob, { left: blind ? 22 : 3 }]} />
+            </View>
+          </Pressable>
+          
+          <Pressable
+            onPress={() => setPendingAssist(!pendingAssist)}
+            disabled={blind}
+            style={[styles.blindBox, {
+              marginTop: 8,
+              opacity: blind ? 0.4 : 1,
+              borderColor: pendingAssist ? C.green : C.line,
+              backgroundColor: pendingAssist ? "#5EE6B018" : C.bg,
+            }
+          ]}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.blindTitle, { color: pendingAssist ? C.green : C.text }]}>
+                Auto-flag assistant
+              </Text>
+              <Text style={styles.blindSub}>
+                {blind
+                  ? "Unavailable in blind mode — there are no flags."
+                  : `Plants every flag logic can prove. Costs ${Math.round((1 - ASSIST_MULTIPLIER) * 100)}% of coins.`}
+              </Text>
+            </View>
+            <View style={[styles.switchTrack, { backgroundColor: pendingAssist ? C.green : C.line }]}>
+              <View style={[styles.switchKnob, { left: pendingAssist ? 22 : 3 }]} />
+            </View>
+          </Pressable>
+          <Pressable
+            onPress={() => setPendingSweep(!pendingSweep)}
+            disabled={blind || !pendingAssist}
+            style={[styles.subBox, {
+              opacity: blind || !pendingAssist ? 0.35 : 1,
+              borderColor: pendingSweep ? C.green : C.line,
+              backgroundColor: pendingSweep ? "#5EE6B012" : C.bg,
+            }]}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.blindTitle, { fontSize: 13, color: pendingSweep ? C.green : C.text }]}>
+                └ Auto-sweep
+              </Text>
+              <Text style={styles.blindSub}>
+                Opens squares its own flags prove safe. Never trusts your manual flags.
+                Costs a further {Math.round((1 - SWEEP_MULTIPLIER) * 100)}%.
+              </Text>
+            </View>
+            <View style={[styles.switchTrack, { backgroundColor: pendingSweep ? C.green : C.line }]}>
+              <View style={[styles.switchKnob, { left: pendingSweep ? 22 : 3 }]} />
             </View>
           </Pressable>
 
@@ -923,6 +983,10 @@ const styles = StyleSheet.create({
   sliderRange: { color: C.dim, fontSize: 10, fontFamily: MONO, textAlign: "right", marginTop: -4 },
 
   blindBox: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 12, padding: 14 },
+  subBox: {
+    flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 12,
+    padding: 12, marginTop: 6, marginLeft: 16,
+  },
   blindTitle: { fontSize: 14, fontWeight: "800" },
   blindSub: { color: C.dim, fontSize: 11.5, marginTop: 3 },
   switchTrack: { width: 44, height: 24, borderRadius: 12, justifyContent: "center" },

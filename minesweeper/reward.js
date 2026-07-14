@@ -18,6 +18,12 @@ export const PAYOUT = {
 
 export const BLIND_MULTIPLIER = 2;
 
+// The auto-flag assistant plants every flag logic proves. Convenience costs 5%.
+export const ASSIST_MULTIPLIER = 0.95;
+
+// Auto-sweep rides on top of auto-flag: it opens what the proven flags make safe.
+export const SWEEP_MULTIPLIER = 0.90;
+
 // A mine with at least this many mines touching it is a Broken Arrow.
 export const BROKEN_ARROW_MIN_NEIGHBORS = 6;
 
@@ -174,15 +180,22 @@ export function collectBombs(board, rows, cols, outcome, firstClick) {
    Scoring one run
    ================================================================== */
 
-export function scoreRun({ board, rows, cols, outcome, blind, firstClick, mode, time }) {
+export function scoreRun({ board, rows, cols, outcome, blind, assist, sweep, firstClick, mode, time }) {
   const rawCoins = coinsForBoard(board);
-  const multiplier = PAYOUT[outcome] * (blind ? BLIND_MULTIPLIER : 1);
+  const helping = assist && !blind;
+  const multiplier =
+    PAYOUT[outcome] *
+    (blind ? BLIND_MULTIPLIER : 1) *
+    (helping ? ASSIST_MULTIPLIER : 1) *
+    (helping && sweep ? SWEEP_MULTIPLIER : 1);
   const coins = Math.floor(rawCoins * multiplier);
   const bombs = collectBombs(board, rows, cols, outcome, firstClick);
 
   return {
     outcome,
     blind,
+    assist,
+    sweep,
     mode,
     time,
     rawCoins,

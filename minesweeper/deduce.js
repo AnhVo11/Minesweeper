@@ -48,11 +48,42 @@ export const neighborsOf = (i, rows, cols) => {
  * one flag often unlocks the next.
  * Returns a new board plus how many flags were added (0 means nothing changed).
  */
-export function applyAutoFlags(board, rows, cols) {
+/**
+ * The live assistant: flag what's proven, then open what's proven safe, and
+ * repeat until nothing new falls out.
+ *
+ * It deliberately IGNORES the player's manual flags and reasons only from
+ * revealed numbers plus flags it proved itself. That guarantees it can never
+ * open a mine: a wrong manual flag would otherwise let Rule 2 "prove" a mine
+ * was safe and detonate it for you, which would be an unforgivable way to lose.
+ * If the player manually flagged a square the assistant can prove is safe, the
+ * flag is simply wrong — it gets cleared and the square opened.
+ */
+export function applyAssist(board, rows, cols, sweep = true) {
   let next = board;
-  let added = 0;
-  let changed = true;
+  let flagsAdded = 0;
+  let opened = 0;
 
+  const clone = () => { if (next === board) next = board.map((c) => ({ ...c })); };
+  const proven = (i) => next[i].flagged && next[i].auto;
+
+  const open = (start) => {
+    const stack = [start];
+    while (stack.length) {
+      const i = stack.pop();
+      const c = next[i];
+      if (c.revealed || c.mine || c.flagged) continue; // any flag, manual or auto, is left alone
+      c.revealed = true;
+      opened++;
+      if (c.adj === 0) {
+        neighborsOf(i, rows, cols).forEach((n) => {
+          if (!next[n].revealed && !proven(n)) stack.push(n);
+        });
+      }
+    }
+  };
+
+  let changed = true;
   while (changed) {
     changed = false;
 
@@ -61,21 +92,30 @@ export function applyAutoFlags(board, rows, cols) {
       if (!cell.revealed || cell.mine || cell.adj === 0) continue;
 
       const ns = neighborsOf(i, rows, cols);
-      const unknown = ns.filter((n) => !next[n].revealed && !next[n].flagged);
+      const unknown = ns.filter((n) => !next[n].revealed && !proven(n));
       if (unknown.length === 0) continue;
 
-      const flagged = ns.filter((n) => next[n].flagged).length;
+      const found = ns.filter((n) => proven(n)).length;
 
-      if (cell.adj - flagged === unknown.length) {
-        if (next === board) next = board.map((c) => ({ ...c }));
-        unknown.forEach((n) => { next[n].flagged = true; });
-        added += unknown.length;
+      // RULE 1 — the squares left over must all be mines.
+      if (cell.adj - found === unknown.length) {
+        clone();
+        unknown.forEach((n) => { next[n] = { ...next[n], flagged: true, auto: true }; });
+        flagsAdded += unknown.length;
+        changed = true;
+        continue;
+      }
+
+      // RULE 2 — every mine here is accounted for, so the rest is safe.
+      if (sweep && cell.adj === found) {
+        clone();
+        unknown.forEach(open);
         changed = true;
       }
     }
   }
 
-  return { board: next, added };
+  return { board: next, flagsAdded, opened };
 }
 
 /* ------------------------------------------------------------------
