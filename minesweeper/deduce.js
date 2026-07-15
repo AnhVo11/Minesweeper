@@ -496,65 +496,48 @@ export function applyAssist(board, rows, cols, sweep = true, smart = false, tota
 }
 
 /* ==================================================================
-   The offline solver — still the old two rules. Left alone for now.
+   The referee.
+
+   Runs at full strength on every move, for every player, no matter what
+   assistance they have switched on. Your toggles decide what the game shows
+   you; they never decide what a mine is worth.
+
+   It strips the player's flags and reasons purely from revealed numbers, then
+   pushes logic as far as it will go. Two things fall out:
+
+     provenMines — the mines logic can force from what has been opened. A flag
+                   banks a bomb only if its square is in here. An unproven flag
+                   is a guess, and guesses do not pay — not even correct ones.
+
+     undeducible — when logic stalls with the board unfinished, the unknown
+                   squares still touching opened ground are exactly the ones it
+                   could not resolve: the coastline of the island. Mines sitting
+                   there are Unexploded Ordnance. Nothing could have found them.
+                   The only way to claim one is to dig its neighbour and live —
+                   which is precisely what turns the guess into a proof.
+
+   Mines buried deep in unopened territory are NOT undeducible. They are merely
+   untouched. Only the coastline counts.
    ================================================================== */
+export function referee(board, rows, cols, totalMines) {
+  const shadow = board.map((c) => ({ ...c, flagged: false, auto: false }));
+  const { board: solved } = applyAssist(shadow, rows, cols, true, true, totalMines);
 
-const UNKNOWN = 0;
-const SAFE = 1;
-const MINE = 2;
+  const provenMines = new Set();
+  const coastline = new Set();
+  let unresolved = 0;
 
-export function solveFromFirstClick(board, rows, cols, firstClick) {
-  const n = rows * cols;
-  const known = new Array(n).fill(UNKNOWN);
+  for (let i = 0; i < solved.length; i++) {
+    if (solved[i].flagged && solved[i].auto) { provenMines.add(i); continue; }
+    if (solved[i].revealed) continue;
 
-  const open = (start) => {
-    const stack = [start];
-    while (stack.length) {
-      const i = stack.pop();
-      if (known[i] === SAFE || board[i].mine) continue;
-      known[i] = SAFE;
-      if (board[i].adj === 0) {
-        neighborsOf(i, rows, cols).forEach((x) => {
-          if (known[x] === UNKNOWN && !board[x].mine) stack.push(x);
-        });
-      }
-    }
-  };
-
-  open(firstClick);
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < n; i++) {
-      if (known[i] !== SAFE || board[i].adj === 0) continue;
-
-      const ns = neighborsOf(i, rows, cols);
-      const unknown = ns.filter((x) => known[x] === UNKNOWN);
-      if (unknown.length === 0) continue;
-
-      const found = ns.filter((x) => known[x] === MINE).length;
-
-      if (board[i].adj - found === unknown.length) {
-        unknown.forEach((x) => { known[x] = MINE; });
-        changed = true;
-        continue;
-      }
-      if (board[i].adj === found) {
-        unknown.forEach(open);
-        changed = true;
-      }
-    }
+    unresolved++;
+    if (neighborsOf(i, rows, cols).some((n) => solved[n].revealed)) coastline.add(i);
   }
 
-  return known;
-}
+  const stalled = unresolved > 0;
+  const undeducible = new Set();
+  if (stalled) coastline.forEach((i) => { if (board[i].mine) undeducible.add(i); });
 
-export function findUndeducibleMines(board, rows, cols, firstClick) {
-  const known = solveFromFirstClick(board, rows, cols, firstClick);
-  const out = new Set();
-  for (let i = 0; i < board.length; i++) {
-    if (board[i].mine && known[i] !== MINE) out.add(i);
-  }
-  return out;
+  return { provenMines, coastline, undeducible, stalled };
 }

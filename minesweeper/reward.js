@@ -1,35 +1,31 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { neighborsOf, findUndeducibleMines } from "./deduce";
-export { findUndeducibleMines };
+import { neighborsOf } from "./deduce";
+
 /* ==================================================================
    TUNING — every balance knob lives here.
    ================================================================== */
 
 // Coins paid per opened safe square, indexed by its number.
-// Index 0 = a blank square, which pays nothing: coins come from
-// working in dangerous territory, not from farming empty corners.
+// Index 0 = a blank square, which pays nothing: coins come from working in
+// dangerous territory, not from farming empty corners.
 export const COIN_TABLE = [0, 1, 4, 9, 16, 25, 40, 60, 70];
 
 export const PAYOUT = {
   win: 1.0,        // cleared the board
   surrender: 1.0,  // banked voluntarily
-  loss: 0.75,      // hit a mine — lower this toward 0.5 to make surrender bite
+  loss: 0.75,      // hit a mine — lower toward 0.5 to make surrender bite
 };
 
 export const BLIND_MULTIPLIER = 2;
 
-// The auto-flag assistant plants every flag logic proves.
-export const ASSIST_MULTIPLIER = 0.80;
-
-// Auto-sweep rides on top: it opens what the proven flags make safe.
-export const SWEEP_MULTIPLIER = 0.65;
-
-// Smart sweep adds set-difference and exact enumeration — a near-complete solver.
-export const SMART_MULTIPLIER = 0.55;
+// Assistance cuts are ADDITIVE, so all three on leaves exactly nothing.
+export const ASSIST_CUT = 0.20; // auto-flag
+export const SWEEP_CUT = 0.35;  // auto-sweep
+export const SMART_CUT = 0.45;  // smart sweep
 
 // Once the assistant is opening squares for you, ordinary bombs stop paying.
-// Mines and Broken Arrows bank nothing. Only Unexploded Ordnance survives —
-// it is, by definition, the one thing the solver could not have found for you.
+// Only Unexploded Ordnance survives — by definition, the one thing the solver
+// could not have found for you.
 export const SWEEP_VOIDS_BOMBS = ["mine", "brokenArrow"];
 
 // A mine with at least this many mines touching it is a Broken Arrow.
@@ -40,7 +36,6 @@ export const BOMB_TYPES = {
   uxo: { key: "uxo", label: "Unexploded Ordnance" },
   brokenArrow: { key: "brokenArrow", label: "Broken Arrow" },
 };
-
 
 /* ==================================================================
    Coins
@@ -53,183 +48,98 @@ export const coinsForBoard = (board) =>
   );
 
 /* ==================================================================
-   The logical solver — this is what defines a UXO.
-
-   Replays the board from the player's first click the way a perfect
-   logician would, using only the two rules a human actually uses:
-
-     1. A number whose unknown neighbors equal its count  -> all are mines.
-     2. A number whose mines are all found                -> the rest are safe.
-
-   Iterate to a fixpoint. Any mine it never manages to force could not
-   have been found by logic alone — you had to read the board, count
-   globally, or call a 50/50. Those are the Unexploded Ordnance.
-
-   Note this must run from the FIRST CLICK, not the finished board. On a
-   won board every safe square is open, so every mine becomes trivially
-   deducible and nothing would ever qualify.
-   
-
-export function findUndeducibleMines(board, rows, cols, firstClick) {
-  const n = rows * cols;
-  const known = new Array(n).fill(0); // 0 = unknown, 1 = known safe, 2 = known mine
-
-  // Open the first click, flooding through blanks exactly as the game does.
-  const stack = [firstClick];
-  while (stack.length) {
-    const i = stack.pop();
-    if (known[i] === 1 || board[i].mine) continue;
-    known[i] = 1;
-    if (board[i].adj === 0) {
-      neighborsOf(i, rows, cols).forEach((x) => {
-        if (known[x] === 0 && !board[x].mine) stack.push(x);
-      });
-    }
-  }
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-
-    for (let i = 0; i < n; i++) {
-      if (known[i] !== 1 || board[i].adj === 0) continue;
-
-      const ns = neighborsOf(i, rows, cols);
-      const unknowns = ns.filter((x) => known[x] === 0);
-      if (unknowns.length === 0) continue;
-
-      const flagged = ns.filter((x) => known[x] === 2).length;
-
-      // Rule 1 — every remaining unknown must be a mine.
-      if (board[i].adj - flagged === unknowns.length) {
-        unknowns.forEach((x) => { known[x] = 2; });
-        changed = true;
-        continue;
-      }
-
-      // Rule 2 — all this number's mines are accounted for, so open the rest.
-      if (board[i].adj === flagged) {
-        unknowns.forEach((x) => {
-          const openStack = [x];
-          while (openStack.length) {
-            const j = openStack.pop();
-            if (known[j] === 1 || board[j].mine) continue;
-            known[j] = 1;
-            if (board[j].adj === 0) {
-              neighborsOf(j, rows, cols).forEach((y) => {
-                if (known[y] === 0 && !board[y].mine) openStack.push(y);
-              });
-            }
-          }
-        });
-        changed = true;
-      }
-    }
-  }
-
-  // Any mine logic never forced.
-  const undeducible = new Set();
-  for (let i = 0; i < n; i++) {
-    if (board[i].mine && known[i] !== 2) undeducible.add(i);
-  }
-  return undeducible;
-}
-  ================================================================== */
-
-/* ==================================================================
    Bomb classification
+
+   The referee (deduce.js) decides everything. It runs at full strength on every
+   move for every player, so what a mine is worth never depends on which
+   assistance you switched on.
+
+     provenMines — mines logic can force right now. A flag banks a bomb only if
+                   its square is in here. An unproven flag is a guess, and
+                   guesses do not pay, even when they happen to be right.
+
+     uxoSet      — mines that sat on the coastline of a stalled board. Logic gave
+                   up on them. To claim one you must dig its neighbour and live,
+                   which is what turns the guess into a proof.
    ================================================================== */
 
 const mineNeighborCount = (board, i, rows, cols) =>
   neighborsOf(i, rows, cols).filter((x) => board[x].mine).length;
 
-/** A flag only earns credit if it touches an opened safe square. */
-export const isFlagEarned = (board, i, rows, cols) =>
-  board[i].flagged &&
-  neighborsOf(i, rows, cols).some((x) => board[x].revealed && !board[x].mine);
-
-/**
- * Which mines did the player actually collect, and what type is each?
- * Specials are win-only. On a loss or surrender you keep the mines you
- * genuinely deduced, but they all bank as plain Mines.
- */
-export function collectBombs(board, rows, cols, outcome, firstClick) {
+export function collectBombs(board, rows, cols, outcome, provenMines, provenEver) {
   const counts = { mine: 0, uxo: 0, brokenArrow: 0 };
 
-  // A loss banks the mines you genuinely deduced, but the shock wave ruins
-  // them: everything comes back as a plain Mine, no specials.
-  if (outcome === "loss") {
-    board.forEach((cell, i) => {
-      if (cell.mine && isFlagEarned(board, i, rows, cols)) counts.mine++;
-    });
-    return counts;
-  }
-
-  const undeducible = findUndeducibleMines(board, rows, cols, firstClick);
-
-  // Which mines count:
-  //   win       — all of them; you cannot clear a board without knowing where
-  //               every mine is, flagged or not.
-  //   surrender — only the ones you actually earned a flag on.
+  // A win means you located every mine — you cannot clear a board otherwise.
+  // Anything short of that, and you keep only what you flagged AND proved.
   const collected = (i) =>
-    outcome === "win" ? true : isFlagEarned(board, i, rows, cols);
+    outcome === "win" ? true : board[i].flagged && provenMines.has(i);
 
   board.forEach((cell, i) => {
     if (!cell.mine || !collected(i)) return;
-    if (undeducible.has(i)) counts.uxo++;
+
+    // The blast ruins them: a lost board banks plain Mines and nothing else.
+    if (outcome === "loss") { counts.mine++; return; }
+
+    // A UXO is a mine the referee NEVER managed to prove, at any point in the
+    // game. If logic could find it, it's ordinary — no matter how it felt to play.
+    if (!provenEver.has(i)) counts.uxo++;
     else if (mineNeighborCount(board, i, rows, cols) >= BROKEN_ARROW_MIN_NEIGHBORS) counts.brokenArrow++;
     else counts.mine++;
   });
 
   return counts;
 }
-
+/** Every mine on the board, typed. Used to colour the grid once the game ends. */
+export function classifyMines(board, rows, cols, provenEver) {
+  const map = {};
+  board.forEach((cell, i) => {
+    if (!cell.mine) return;
+    if (!provenEver.has(i)) map[i] = "uxo";
+    else if (mineNeighborCount(board, i, rows, cols) >= BROKEN_ARROW_MIN_NEIGHBORS) map[i] = "brokenArrow";
+    else map[i] = "mine";
+  });
+  return map;
+}
 /* ==================================================================
    Scoring one run
    ================================================================== */
 
-export function scoreRun({ board, rows, cols, outcome, blind, assist, sweep, smart, firstClick, mode, time }) {
+export function scoreRun({
+  board, rows, cols, outcome, blind, assist, sweep, smart,
+  provenMines, provenEver, mode, time,
+}) {
   const rawCoins = coinsForBoard(board);
   const helping = assist && !blind;
+
   const cut =
-    (helping ? 0.20 : 0) +
-    (helping && sweep ? 0.35 : 0) +
-    (helping && sweep && smart ? 0.45 : 0);
+    (helping ? ASSIST_CUT : 0) +
+    (helping && sweep ? SWEEP_CUT : 0) +
+    (helping && sweep && smart ? SMART_CUT : 0);
 
   const multiplier =
     PAYOUT[outcome] * (blind ? BLIND_MULTIPLIER : 1) * Math.max(0, 1 - cut);
   const coins = Math.floor(rawCoins * multiplier);
 
-  // A plain-language receipt, so the payout is never a mystery.
-  const breakdown = [];
-  if (outcome === "loss") breakdown.push({ label: "Lost the board", amount: `×${PAYOUT.loss}` });
-  if (blind) breakdown.push({ label: "Blind mode", amount: `×${BLIND_MULTIPLIER}`, good: true });
-  if (helping) breakdown.push({ label: "Auto-flag", amount: "−20%" });
-  if (helping && sweep) breakdown.push({ label: "Auto-sweep", amount: "−35%" });
-  if (helping && sweep && smart) breakdown.push({ label: "Smart sweep", amount: "−45%" });
-  const bombs = collectBombs(board, rows, cols, outcome, firstClick);
+ const bombs = collectBombs(board, rows, cols, outcome, provenMines, provenEver);
 
- // Auto-sweep did the finding, so it doesn't count as your find. Remember what
+  // Auto-sweep did the finding, so it doesn't count as your find. Remember what
   // was on the board anyway — the player deserves to see what they lost.
   const bombsVoided = helping && sweep;
   const bombsFound = { ...bombs };
   if (bombsVoided) SWEEP_VOIDS_BOMBS.forEach((k) => { bombs[k] = 0; });
 
+  // A plain-language receipt, so the payout is never a mystery.
+  const breakdown = [];
+  if (outcome === "loss") breakdown.push({ label: "Lost the board", amount: `×${PAYOUT.loss}` });
+  if (blind) breakdown.push({ label: "Blind mode", amount: `×${BLIND_MULTIPLIER}`, good: true });
+  if (helping) breakdown.push({ label: "Auto-flag", amount: `−${ASSIST_CUT * 100}%` });
+  if (helping && sweep) breakdown.push({ label: "Auto-sweep", amount: `−${SWEEP_CUT * 100}%` });
+  if (helping && sweep && smart) breakdown.push({ label: "Smart sweep", amount: `−${SMART_CUT * 100}%` });
+
   return {
-    outcome,
-    blind,
-    assist,
-    sweep,
-    smart,
-    mode,
-    time,
-    rawCoins,
-    multiplier,
-    breakdown,
-    coins,
-    bombs,
-    bombsVoided,
-    bombsFound,
+    outcome, blind, assist, sweep, smart, mode, time,
+    rawCoins, multiplier, coins, breakdown,
+    bombs, bombsFound, bombsVoided,
     bombTotal: bombs.mine + bombs.uxo + bombs.brokenArrow,
     safeOpened: board.filter((c) => c.revealed && !c.mine).length,
   };
@@ -248,7 +158,7 @@ export const EMPTY_PROFILE = {
   wins: 0,
   surrenders: 0,
   losses: 0,
-  bestTime: {}, // { easy: 91, medium: 402, ... } seconds, wins only
+  bestTime: {}, // seconds, wins only
 };
 
 export async function loadProfile() {
@@ -269,7 +179,6 @@ export async function saveProfile(profile) {
   }
 }
 
-/** Fold a scored run into the profile and persist it. Returns the new profile. */
 export async function bankRun(profile, run, modeKey) {
   const next = {
     ...profile,

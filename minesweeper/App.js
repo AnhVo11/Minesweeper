@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { applyAssist } from "./deduce";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { applyAssist, referee } from "./deduce";
 import {
   View,
   Text,
@@ -21,11 +21,12 @@ import {
   bankRun,
   loadProfile,
   resetProfile,
-  isFlagEarned,
+  classifyMines,
   EMPTY_PROFILE,
   PAYOUT,
   BLIND_MULTIPLIER,
   ASSIST_MULTIPLIER,
+  ASSIST_CUT,
   SWEEP_MULTIPLIER,
   SMART_MULTIPLIER,
 } from "./reward";
@@ -176,20 +177,18 @@ function floodReveal(board, rows, cols, start) {
   return next;
 }
 
-const countEarnedFlags = (board, rows, cols) =>
-  board.reduce((acc, cell, i) => acc + (cell.mine && isFlagEarned(board, i, rows, cols) ? 1 : 0), 0);
 
 /* ------------------------------------------------------------------ */
 /*  Cell                                                               */
 /* ------------------------------------------------------------------ */
 
-const Cell = React.memo(function Cell({ cell, size, over, peek, onPress, onLongPress }) {
+const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPress, onLongPress }) {
   const showMine = cell.revealed && cell.mine;
   const wrongFlag = over && cell.flagged && !cell.mine;
 
   let bg = C.cellUp;
   if (cell.exploded) bg = C.red;
-  else if (showMine) bg = C.mineBg;
+  else if (showMine) bg = C.cellDown;
   else if (cell.revealed) bg = C.cellDown;
 
   const isNumber = cell.revealed && !cell.mine && cell.adj > 0;
@@ -226,14 +225,50 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, onPress, onLongP
         </Text>
       )}
 
-      {/* Glyph-free markers — no font can fail to render a shape. */}
+      {/* Flag — a red triangle. Solid once the board has proved it; faded while
+          it's still only your call. */}
       {!cell.revealed && cell.flagged && !wrongFlag && (
         <View style={{
+          width: 0, height: 0, backgroundColor: "transparent",
+          borderLeftWidth: size * 0.28, borderRightWidth: size * 0.28,
+          borderBottomWidth: size * 0.48,
+          borderLeftColor: "transparent", borderRightColor: "transparent",
+          borderBottomColor: C.red,
+          opacity: cell.auto ? 1 : 0.4,
+        }} />
+      )}
+
+      {/* A flag that turned out to be wrong. */}
+      {wrongFlag && (
+        <View style={{
           width: size * 0.5, height: size * 0.5, borderRadius: 2,
-          // solid = the board proved it; hollow = still just your call
-          backgroundColor: cell.auto ? C.amber : "transparent",
-          borderWidth: cell.auto ? 0 : 1.5,
-          borderColor: C.amber,
+          borderWidth: 1.5, borderColor: C.red, opacity: 0.5,
+        }} />
+      )}
+
+      {/* The one you detonated: a black circle. */}
+      {cell.exploded && (
+        <View style={{
+          width: size * 0.55, height: size * 0.55, borderRadius: size,
+          backgroundColor: C.black,
+        }} />
+      )}
+
+      {/* Every other mine, typed and coloured once the game is over. */}
+      {showMine && !cell.exploded && (
+        <View style={{
+          width: size * 0.5, height: size * 0.5, borderRadius: 2,
+          backgroundColor:
+            bombType === "uxo" ? C.gold
+            : bombType === "brokenArrow" ? C.violet
+            : C.brown,
+        }} />
+      )}
+
+      {peek && !cell.revealed && !cell.flagged && cell.mine && (
+        <View style={{
+          position: "absolute", width: size * 0.42, height: size * 0.42,
+          borderRadius: size, borderWidth: 1.5, borderColor: C.red, opacity: 0.85,
         }} />
       )}
       {wrongFlag && (
@@ -282,7 +317,10 @@ export default function App() {
   const [flagMode, setFlagMode] = useState(false);
   const [time, setTime] = useState(0);
   const [run, setRun] = useState(null); // scored result of the finished game
-
+  const [bombMap, setBombMap] = useState({});
+const [proven, setProven] = useState(new Set());
+  const provenRef = useRef(new Set());
+  const provenEverRef = useRef(new Set()); // every mine logic ever pinned down
   // profile
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -331,7 +369,11 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
     setStatus("idle");
     setFlagMode(false);
     setTime(0);
+    setBombMap({});
     setRun(null);
+    setProven(new Set());
+    provenRef.current = new Set();
+    provenEverRef.current = new Set();
     setCode("");
     setPeek(false);
     setCheated(false);
@@ -388,11 +430,12 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
       assist,
       sweep,
       smart,
-      firstClick: click,
+      provenMines: provenRef.current,
+      provenEver: provenEverRef.current,
       mode: MODES[modeKey].label,
       time,
     });
-
+setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current));
     setRun(scored);
     Vibration.vibrate(outcome === "loss" ? 200 : [0, 40, 60, 40]);
 
@@ -421,6 +464,23 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
   // Flags what it can prove, then opens what that proves safe — and repeats.
  const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep, smart, mines).board);
 
+ // The referee runs at full strength after every move, whatever the player has
+  // switched on. It decides which flags are proven and which mines were stranded
+  // on the coastline of a stalled board — the UXOs.
+  // The referee runs at full strength after every move, whatever the player has
+  // switched on. Anything it proves is, by definition, ordinary — so we remember
+  // everything it ever found. What it NEVER finds is Unexploded Ordnance.
+  //
+  // It deliberately does not run on a finished board: once every safe square is
+  // open, every remaining square is trivially a mine, and it would "prove" the
+  // lot — erasing the very UXOs the player dug around to earn.
+  const audit = (b) => {
+    if (b.every((c) => c.revealed || c.mine)) return;
+    const r = referee(b, rows, cols, mines);
+    provenRef.current = r.provenMines;
+    setProven(r.provenMines);
+    r.provenMines.forEach((i) => provenEverRef.current.add(i));
+  };
   /* ---------- moves ---------- */
   const reveal = (i) => {
     if (!active) return;
@@ -457,6 +517,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
       } else {
         const settled = settle(nb);
         setBoard(settled);
+        audit(settled);
         if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
       }
       return;
@@ -478,6 +539,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
     const nb = floodReveal(b, rows, cols, i);
     const settled = settle(nb);
     setBoard(settled);
+    audit(settled);
     if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
   };
 
@@ -492,7 +554,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
 
   const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   const progress = totalSafe ? safeOpened / totalSafe : 0;
-  const liveEarned = countEarnedFlags(board, rows, cols);
+ const liveEarned = board.reduce((a, c, i) => a + (c.flagged && proven.has(i) ? 1 : 0), 0);
   const face = status === "lost" ? ":(" : status === "won" ? ":D" : status === "surrendered" ? ":|" : ":)";
 
   /* ---------- render ---------- */
@@ -571,6 +633,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
                 onPress={() => handlePress(i)}
                 onLongPress={() => toggleFlag(i)}
                 peek={peek}
+                bombType={bombMap[i]}
               />
             ))}
           </View>
@@ -611,7 +674,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
                 {liveEarned}
                 <Text style={styles.statSub}> / {flagsPlaced} placed</Text>
               </Text>
-              <Text style={styles.statNote}>Only flags touching an opened square earn credit.</Text>
+              <Text style={styles.statNote}>Only flags the board can prove earn credit. A guess pays nothing.</Text>
             </View>
           )}
         </View>
@@ -665,7 +728,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
             {/* Bomb receipt — what was on the board, and what you actually keep. */}
             <View style={[styles.receipt, { marginTop: 12 }]}>
               {[
-                ["mine", "Mines", C.red],
+                ["mine", "Mines", C.black],
                 ["brokenArrow", "Broken Arrow", C.violet],
                 ["uxo", "Unexploded Ordnance", C.gold],
               ].map(([key, label, col]) => {
