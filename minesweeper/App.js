@@ -38,17 +38,25 @@ import {
 const MODES = {
   easy: { label: "Easy", rows: 9, cols: 9, mines: 10 },
   medium: { label: "Medium", rows: 16, cols: 16, mines: 40 },
-  hard: { label: "Hard", rows: 30, cols: 16, mines: 160 },
-  extreme: { label: "Extreme", rows: 30, cols: 24, mines: 160 },
+  hard: { label: "Hard", rows: 30, cols: 16, mines: 99 },
+  extreme: { label: "Extreme", rows: 40, cols: 24, mines: 199 },
   custom: { label: "Custom", rows: 12, cols: 12, mines: 24 },
 };
 
-const LIMITS = { minRows: 9, maxRows: 40, minCols: 9, maxCols: 30, minMines: 10, maxMines: 280 };
+const LIMITS = { minRows: 9, maxRows: 40, minCols: 9, maxCols: 30, minMines: 10, maxMines: 370 };
 
 // A board needs breathing room: the first click and its 8 neighbors are always
 // safe, and past ~40% density the board stops being solvable by deduction.
 const maxMinesFor = (r, c) =>
-  Math.max(LIMITS.minMines, Math.min(LIMITS.maxMines, Math.floor(r * c * 0.4), r * c - 10));
+  Math.max(
+    LIMITS.minMines,                       // never below 10
+    Math.min(
+      LIMITS.maxMines,                     // 370 hard cap (a full 40×30)
+      Math.floor((r * c * 9) / 40) + 100,  // eases off: −9 mines per 40 cells lost
+      Math.floor(r * c * 0.4),             // 40% solvability ceiling (small boards)
+      r * c - 10                           // keep a 10-cell safe reserve
+    )
+  );
 
 const C = {
   bg: "#12151C",
@@ -324,6 +332,13 @@ const [proven, setProven] = useState(new Set());
   const provenEverRef = useRef(new Set()); // every mine logic ever pinned down
   // profile
   const undeducibleEverRef = useRef(new Set()); // mines ever stranded on a stalled coastline
+  const [solving, setSolving] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const speedRef = useRef(1);
+  const stepsRef = useRef([]);
+  const animBoardRef = useRef(null);
+  const solveCtxRef = useRef({ click: null });
+  const endSolveRef = useRef(() => {});
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [profileOpen, setProfileOpen] = useState(false);
   const [code, setCode] = useState("");
@@ -349,6 +364,26 @@ const [proven, setProven] = useState(new Set());
     const id = setInterval(() => setTime((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [status]);
+
+  useEffect(() => {
+    if (!solving) return;
+    const id = setInterval(() => {
+      const steps = stepsRef.current;
+      if (!steps.length) { endSolveRef.current(); return; }
+      const per = speedRef.current;                 // 1× / 2× / 4× = steps per tick
+      const b = animBoardRef.current.slice();        // new array, new objects only for changed cells
+      for (let k = 0; k < per && steps.length; k++) {
+        const s = steps.shift();
+        b[s.i] = s.t === "flag"
+          ? { ...b[s.i], flagged: true, auto: true }
+          : { ...b[s.i], revealed: true, flagged: false };
+      }
+      animBoardRef.current = b;
+      setBoard(b);
+      if (!steps.length) endSolveRef.current();
+    }, 45);
+    return () => clearInterval(id);
+  }, [solving]);
 
   /* ---------- sizing: the board always fits the width ---------- */
   const boardMaxW = Math.min(SCREEN_W, 640) - 8 - 6;
@@ -377,6 +412,11 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
     provenRef.current = new Set();
     provenEverRef.current = new Set();
     undeducibleEverRef.current = new Set();
+    setSolving(false);
+    stepsRef.current = [];
+    animBoardRef.current = null;
+    speedRef.current = 1;
+    setSpeed(1);
     setCode("");
     setPeek(false);
     setCheated(false);
@@ -498,6 +538,55 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
     r.provenMines.forEach((i) => provenEverRef.current.add(i));
     r.undeducible.forEach((i) => undeducibleEverRef.current.add(i));
   };
+
+  // Latest closure, so the interval always calls a fresh finish/audit.
+  endSolveRef.current = () => {
+    setSolving(false);
+    const b = animBoardRef.current;
+    if (!b) return;
+    audit(b);
+    if (b.filter((x) => x.revealed && !x.mine).length === totalSafe)
+      finish(b, "win", solveCtxRef.current.click);
+  };
+
+  // Route every successful dig through here. No assist → resolve instantly, as
+  // before. Assist on → animate the solver's steps one at a time.
+  const applyMoveResult = (nb, click) => {
+    const immediate = () => {
+      setBoard(nb);
+      audit(nb);
+      if (nb.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(nb, "win", click);
+    };
+    if (blind || !assist) return immediate();
+
+    const { steps } = applyAssist(nb, rows, cols, sweep, smart, mines, true);
+    if (steps.length === 0) return immediate();
+
+    stepsRef.current = steps;
+    animBoardRef.current = nb.map((c) => ({ ...c }));
+    solveCtxRef.current = { click };
+    setBoard(animBoardRef.current);
+    speedRef.current = 1;
+    setSpeed(1);
+    setSolving(true);
+  };
+
+  const bumpSpeed = () =>
+    setSpeed((p) => { const n = p === 1 ? 2 : p === 2 ? 4 : 1; speedRef.current = n; return n; });
+
+  const skipSolve = () => {
+    const steps = stepsRef.current;
+    const b = animBoardRef.current.slice();
+    while (steps.length) {
+      const s = steps.shift();
+      b[s.i] = s.t === "flag"
+        ? { ...b[s.i], flagged: true, auto: true }
+        : { ...b[s.i], revealed: true, flagged: false };
+    }
+    animBoardRef.current = b;
+    setBoard(b);
+    endSolveRef.current();
+  };
   /* ---------- moves ---------- */
   const reveal = (i) => {
     if (!active) return;
@@ -531,11 +620,8 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
         nb = nb.map((x) => (x.mine ? { ...x, revealed: true } : x));
         setBoard(nb);
         finish(nb, "loss", click);
-      } else {
-        const settled = settle(nb);
-        setBoard(settled);
-        audit(settled);
-        if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
+     } else {
+        applyMoveResult(nb, click);
       }
       return;
     }
@@ -553,11 +639,8 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
       return;
     }
 
-    const nb = floodReveal(b, rows, cols, i);
-    const settled = settle(nb);
-    setBoard(settled);
-    audit(settled);
-    if (settled.filter((x) => x.revealed && !x.mine).length === totalSafe) finish(settled, "win", click);
+   const nb = floodReveal(b, rows, cols, i);
+    applyMoveResult(nb, click);
   };
 
   const toggleFlag = (i) => {
@@ -568,7 +651,10 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
     Vibration.vibrate(25);
   };
 
-  const handlePress = (i) => (flagMode && !blind ? toggleFlag(i) : reveal(i));
+  const handlePress = (i) => {
+    if (solving) { bumpSpeed(); return; }
+    return flagMode && !blind ? toggleFlag(i) : reveal(i);
+  };
 
   const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   const progress = totalSafe ? safeOpened / totalSafe : 0;
@@ -655,6 +741,19 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
               />
             ))}
           </View>
+          {solving && (
+          <View style={styles.solveBar}>
+            <Text style={styles.solveLabel}>Assistant solving…</Text>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Pressable onPress={bumpSpeed} style={styles.solveBtn}>
+                <Text style={styles.solveBtnText}>{speed}×</Text>
+              </Pressable>
+              <Pressable onPress={skipSolve} style={[styles.solveBtn, styles.skipBtn]}>
+                <Text style={[styles.solveBtnText, { color: C.bg }]}>Skip</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
         </View>
 
         <Text style={styles.hint}>
@@ -666,7 +765,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
         </Text>
 
         {/* Surrender */}
-        {status === "playing" && (
+        {status === "playing" && !solving && (
           <Pressable onPress={askSurrender} style={styles.surrenderBtn}>
             <Text style={styles.surrenderText}>Surrender & bank</Text>
           </Pressable>
@@ -1035,6 +1134,18 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
 /* ------------------------------------------------------------------ */
 
 const styles = StyleSheet.create({
+  solveBar: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    backgroundColor: C.panel, borderRadius: 12, borderWidth: 1, borderColor: C.green,
+    paddingVertical: 8, paddingHorizontal: 12, marginTop: 10, marginBottom: 4,
+  },
+  solveLabel: { color: C.green, fontSize: 12, fontWeight: "700" },
+  solveBtn: {
+    minWidth: 46, alignItems: "center", borderRadius: 8, borderWidth: 1,
+    borderColor: C.green, paddingVertical: 6, paddingHorizontal: 10,
+  },
+  solveBtnText: { color: C.green, fontSize: 13, fontWeight: "800", fontFamily: MONO },
+  skipBtn: { backgroundColor: C.green, borderColor: C.green },
   safe: { flex: 1, backgroundColor: C.bg },
   scroll: { paddingHorizontal: 4, paddingTop: 10, paddingBottom: 44 },
   topBar: {

@@ -127,11 +127,11 @@ function certainties(cells, byTotal, totals) {
  * @param smart      may it use set-difference and exact enumeration?
  * @param totalMines the board's mine count — without it, no global counting.
  */
-export function applyAssist(board, rows, cols, sweep = true, smart = false, totalMines = null) {
+export function applyAssist(board, rows, cols, sweep = true, smart = false, totalMines = null, record = false) {
   let next = board;
   let flagsAdded = 0;
   let opened = 0;
-
+const steps = [];
   const clone = () => { if (next === board) next = board.map((c) => ({ ...c })); };
   const proven = (i) => next[i].flagged && next[i].auto;
 
@@ -140,6 +140,7 @@ export function applyAssist(board, rows, cols, sweep = true, smart = false, tota
     clone();
     next[i] = { ...next[i], flagged: true, auto: true };
     flagsAdded++;
+    if (record) steps.push({ t: "flag", i });
     return true;
   };
 
@@ -155,6 +156,7 @@ export function applyAssist(board, rows, cols, sweep = true, smart = false, tota
       c.revealed = true;
       c.flagged = false;
       opened++;
+      if (record) steps.push({ t: "open", i });
       did = true;
       if (c.adj === 0) {
         neighborsOf(i, rows, cols).forEach((n) => {
@@ -492,7 +494,7 @@ export function applyAssist(board, rows, cols, sweep = true, smart = false, tota
     if (!progress && smart) progress = windowPass();
   }
 
-  return { board: next, flagsAdded, opened };
+  return { board: next, flagsAdded, opened, steps };
 }
 
 /* ==================================================================
