@@ -89,6 +89,13 @@ to a plain Mine.
 
 ### Flags
 
+- **Locked (red border)** — the board has *proved* it. Banks a bomb, and can no
+  longer be unflagged.
+- **Unlocked** — still just your call. Banks nothing, yet, and you can remove it.
+
+An unlocked flag means *unproven*, not *wrong*. You can't tell which just by
+looking. To prove it: dig its partner and survive.
+
 - **Solid red triangle** — the board has *proved* it. Banks a bomb.
 - **Faded red triangle** — still just your call. Banks nothing, yet.
 

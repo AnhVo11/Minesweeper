@@ -63,6 +63,8 @@ const C = {
   red: "#FF5C5C",
   gold: "#F5D06B",
   violet: "#C99CFF",
+  brown: "#8B5A2B",
+  black: "#0A0C10",
   mineBg: "#3A2430",
 };
 
@@ -208,6 +210,7 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
           backgroundColor: bg,
           borderTopColor: cell.revealed ? "transparent" : "rgba(255,255,255,0.10)",
         },
+        
       ]}
     >
       {isNumber && (
@@ -225,32 +228,42 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
         </Text>
       )}
 
-      {/* Flag — a red triangle. Solid once the board has proved it; faded while
-          it's still only your call. */}
+     {/* Flag — a red pennant off an implied pole on the left. Always full
+          opacity; whether it's proven shows up as the locked border instead. */}
       {!cell.revealed && cell.flagged && !wrongFlag && (
         <View style={{
           width: 0, height: 0, backgroundColor: "transparent",
-          borderLeftWidth: size * 0.28, borderRightWidth: size * 0.28,
-          borderBottomWidth: size * 0.48,
-          borderLeftColor: "transparent", borderRightColor: "transparent",
-          borderBottomColor: C.red,
-          opacity: cell.auto ? 1 : 0.4,
+          borderTopWidth: size * 0.24, borderBottomWidth: size * 0.24,
+          borderLeftWidth: size * 0.48,
+          borderTopColor: "transparent", borderBottomColor: "transparent",
+          borderLeftColor: C.red,
         }} />
       )}
 
-      {/* A flag that turned out to be wrong. */}
+
+    {/* A flag that turned out to be wrong. */}
       {wrongFlag && (
         <View style={{
           width: size * 0.5, height: size * 0.5, borderRadius: 2,
           borderWidth: 1.5, borderColor: C.red, opacity: 0.5,
         }} />
       )}
+      {/* Locked (auto/proven) flag — a red frame drawn INSIDE the cell, inset
+          from the edges so it reads as an inner border. */}
+      {!cell.revealed && cell.flagged && cell.auto && (
+        <View pointerEvents="none" style={{
+          position: "absolute",
+          top: 2, left: 2, right: 2, bottom: 2,
+          borderWidth: 2, borderColor: C.red,
+          borderRadius: size < 16 ? 1 : 4,
+        }} />
+      )}
 
-      {/* The one you detonated: a black circle. */}
+      {/* The one you detonated: a dark circle ringed in red. */}
       {cell.exploded && (
         <View style={{
-          width: size * 0.55, height: size * 0.55, borderRadius: size,
-          backgroundColor: C.black,
+          width: size * 0.5, height: size * 0.5, borderRadius: size,
+          backgroundColor: C.black, borderWidth: 1.5, borderColor: C.red,
         }} />
       )}
 
@@ -265,18 +278,6 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
         }} />
       )}
 
-      {peek && !cell.revealed && !cell.flagged && cell.mine && (
-        <View style={{
-          position: "absolute", width: size * 0.42, height: size * 0.42,
-          borderRadius: size, borderWidth: 1.5, borderColor: C.red, opacity: 0.85,
-        }} />
-      )}
-      {wrongFlag && (
-        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: 2, backgroundColor: C.red, opacity: 0.5 }} />
-      )}
-      {showMine && (
-        <View style={{ width: size * 0.5, height: size * 0.5, borderRadius: size, backgroundColor: cell.exploded ? "#12151C" : C.red }} />
-      )}
       {peek && !cell.revealed && !cell.flagged && cell.mine && (
         <View style={{
           position: "absolute", width: size * 0.42, height: size * 0.42,
@@ -322,6 +323,7 @@ const [proven, setProven] = useState(new Set());
   const provenRef = useRef(new Set());
   const provenEverRef = useRef(new Set()); // every mine logic ever pinned down
   // profile
+  const undeducibleEverRef = useRef(new Set()); // mines ever stranded on a stalled coastline
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [profileOpen, setProfileOpen] = useState(false);
   const [code, setCode] = useState("");
@@ -374,6 +376,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
     setProven(new Set());
     provenRef.current = new Set();
     provenEverRef.current = new Set();
+    undeducibleEverRef.current = new Set();
     setCode("");
     setPeek(false);
     setCheated(false);
@@ -421,6 +424,18 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
   const finish = async (finalBoard, outcome, click) => {
     setStatus(outcome === "win" ? "won" : outcome === "surrender" ? "surrendered" : "lost");
 
+    /*
+    // Endgame pass. sweepBot gets one last solve on the finished board, but with
+    // global mine-counting OFF (totalMines = null) — so it can only prove a mine
+    // that an adjacent number genuinely forces, never the trivial "all remaining
+    // squares must be mines." Everything it proves here is an ordinary mine that
+    // was only forced by the final reveal; whatever's left unproven is a true
+    // ambiguity — a real UXO.
+    referee(finalBoard, rows, cols, null).provenMines.forEach((i) =>
+      provenEverRef.current.add(i)
+    );
+    */
+
     const scored = scoreRun({
       board: finalBoard,
       rows,
@@ -432,10 +447,11 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
       smart,
       provenMines: provenRef.current,
       provenEver: provenEverRef.current,
+      undeducibleEver: undeducibleEverRef.current,
       mode: MODES[modeKey].label,
       time,
     });
-setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current));
+setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeducibleEverRef.current));
     setRun(scored);
     Vibration.vibrate(outcome === "loss" ? 200 : [0, 40, 60, 40]);
 
@@ -480,6 +496,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current));
     provenRef.current = r.provenMines;
     setProven(r.provenMines);
     r.provenMines.forEach((i) => provenEverRef.current.add(i));
+    r.undeducible.forEach((i) => undeducibleEverRef.current.add(i));
   };
   /* ---------- moves ---------- */
   const reveal = (i) => {
@@ -545,6 +562,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current));
 
   const toggleFlag = (i) => {
     if (!active || blind || board[i].revealed) return;
+    if (board[i].flagged && board[i].auto) return; // proven — locked, can't unflag
     setBoard(board.map((x, idx) => (idx === i ? { ...x, flagged: !x.flagged } : x)));
     if (status === "idle") setStatus("playing");
     Vibration.vibrate(25);
@@ -1057,7 +1075,6 @@ const styles = StyleSheet.create({
     alignSelf: "center", overflow: "hidden", flexGrow: 0,
   },
   cell: { alignItems: "center", justifyContent: "center", borderTopWidth: 1, overflow: "hidden" },
-
   hint: { color: C.dim, fontSize: 11, textAlign: "center", marginTop: 10, marginBottom: 10 },
 
   surrenderBtn: {

@@ -22,7 +22,9 @@ export const BLIND_MULTIPLIER = 2;
 export const ASSIST_CUT = 0.20; // auto-flag
 export const SWEEP_CUT = 0.35;  // auto-sweep
 export const SMART_CUT = 0.45;  // smart sweep
-
+export const ASSIST_MULTIPLIER = 1 - ASSIST_CUT;
+export const SWEEP_MULTIPLIER = 1 - SWEEP_CUT;
+export const SMART_MULTIPLIER = 1 - SMART_CUT;
 // Once the assistant is opening squares for you, ordinary bombs stop paying.
 // Only Unexploded Ordnance survives — by definition, the one thing the solver
 // could not have found for you.
@@ -66,7 +68,7 @@ export const coinsForBoard = (board) =>
 const mineNeighborCount = (board, i, rows, cols) =>
   neighborsOf(i, rows, cols).filter((x) => board[x].mine).length;
 
-export function collectBombs(board, rows, cols, outcome, provenMines, provenEver) {
+export function collectBombs(board, rows, cols, outcome, provenMines, provenEver, undeducibleEver) {
   const counts = { mine: 0, uxo: 0, brokenArrow: 0 };
 
   // A win means you located every mine — you cannot clear a board otherwise.
@@ -82,19 +84,21 @@ export function collectBombs(board, rows, cols, outcome, provenMines, provenEver
 
     // A UXO is a mine the referee NEVER managed to prove, at any point in the
     // game. If logic could find it, it's ordinary — no matter how it felt to play.
-    if (!provenEver.has(i)) counts.uxo++;
+if (undeducibleEver && undeducibleEver.has(i) && !provenEver.has(i)) counts.uxo++;
     else if (mineNeighborCount(board, i, rows, cols) >= BROKEN_ARROW_MIN_NEIGHBORS) counts.brokenArrow++;
     else counts.mine++;
   });
 
   return counts;
 }
+
+
 /** Every mine on the board, typed. Used to colour the grid once the game ends. */
-export function classifyMines(board, rows, cols, provenEver) {
+export function classifyMines(board, rows, cols, provenEver , undeducibleEver) {
   const map = {};
   board.forEach((cell, i) => {
     if (!cell.mine) return;
-    if (!provenEver.has(i)) map[i] = "uxo";
+    if (undeducibleEver && undeducibleEver.has(i) && !provenEver.has(i)) map[i] = "uxo";
     else if (mineNeighborCount(board, i, rows, cols) >= BROKEN_ARROW_MIN_NEIGHBORS) map[i] = "brokenArrow";
     else map[i] = "mine";
   });
@@ -106,7 +110,7 @@ export function classifyMines(board, rows, cols, provenEver) {
 
 export function scoreRun({
   board, rows, cols, outcome, blind, assist, sweep, smart,
-  provenMines, provenEver, mode, time,
+  provenMines, provenEver,undeducibleEver, mode, time,
 }) {
   const rawCoins = coinsForBoard(board);
   const helping = assist && !blind;
@@ -120,7 +124,7 @@ export function scoreRun({
     PAYOUT[outcome] * (blind ? BLIND_MULTIPLIER : 1) * Math.max(0, 1 - cut);
   const coins = Math.floor(rawCoins * multiplier);
 
- const bombs = collectBombs(board, rows, cols, outcome, provenMines, provenEver);
+ const bombs = collectBombs(board, rows, cols, outcome, provenMines, provenEver, undeducibleEver);
 
   // Auto-sweep did the finding, so it doesn't count as your find. Remember what
   // was on the board anyway — the player deserves to see what they lost.
