@@ -109,44 +109,57 @@ export function classifyMines(board, rows, cols, provenEver , undeducibleEver) {
    ================================================================== */
 
 export function scoreRun({
-  board, rows, cols, outcome, blind, assist, sweep, smart,
-  provenMines, provenEver,undeducibleEver, mode, time,
+  board, rows, cols, outcome, blind, assist, sweep, smart, challenge,
+  provenMines, provenEver, undeducibleEver, mode, time,
 }) {
   const rawCoins = coinsForBoard(board);
   const helping = assist && !blind;
 
-  const cut =
+  // Challenge: the bot clears every deducible cell, so every move YOU make is a
+  // real guess. You keep the FULL reward — no assist cut — but only by winning.
+  const cut = challenge ? 0 : (
     (helping ? ASSIST_CUT : 0) +
     (helping && sweep ? SWEEP_CUT : 0) +
-    (helping && sweep && smart ? SMART_CUT : 0);
+    (helping && sweep && smart ? SMART_CUT : 0)
+  );
 
   const multiplier =
     PAYOUT[outcome] * (blind ? BLIND_MULTIPLIER : 1) * Math.max(0, 1 - cut);
   const coins = Math.floor(rawCoins * multiplier);
 
- const bombs = collectBombs(board, rows, cols, outcome, provenMines, provenEver, undeducibleEver);
+  const bombs = collectBombs(board, rows, cols, outcome, provenMines, provenEver, undeducibleEver);
 
-  // Auto-sweep did the finding, so it doesn't count as your find. Remember what
-  // was on the board anyway — the player deserves to see what they lost.
-  const bombsVoided = helping && sweep;
+  // Auto-sweep normally voids ordinary bombs — but not in challenge; the risk was yours.
+  const bombsVoided = helping && sweep && !challenge;
   const bombsFound = { ...bombs };
   if (bombsVoided) SWEEP_VOIDS_BOMBS.forEach((k) => { bombs[k] = 0; });
 
-  // A plain-language receipt, so the payout is never a mystery.
   const breakdown = [];
   if (outcome === "loss") breakdown.push({ label: "Lost the board", amount: `×${PAYOUT.loss}` });
   if (blind) breakdown.push({ label: "Blind mode", amount: `×${BLIND_MULTIPLIER}`, good: true });
-  if (helping) breakdown.push({ label: "Auto-flag", amount: `−${ASSIST_CUT * 100}%` });
-  if (helping && sweep) breakdown.push({ label: "Auto-sweep", amount: `−${SWEEP_CUT * 100}%` });
-  if (helping && sweep && smart) breakdown.push({ label: "Smart sweep", amount: `−${SMART_CUT * 100}%` });
+  if (challenge) breakdown.push({ label: "Challenge — full reward", amount: "×1", good: true });
+  if (!challenge && helping) breakdown.push({ label: "Auto-flag", amount: `−${ASSIST_CUT * 100}%` });
+  if (!challenge && helping && sweep) breakdown.push({ label: "Auto-sweep", amount: `−${SWEEP_CUT * 100}%` });
+  if (!challenge && helping && sweep && smart) breakdown.push({ label: "Smart sweep", amount: `−${SMART_CUT * 100}%` });
 
-  return {
+  const result = {
     outcome, blind, assist, sweep, smart, mode, time,
     rawCoins, multiplier, coins, breakdown,
     bombs, bombsFound, bombsVoided,
     bombTotal: bombs.mine + bombs.uxo + bombs.brokenArrow,
     safeOpened: board.filter((c) => c.revealed && !c.mine).length,
   };
+
+  // Win-or-nothing: challenge banks zero unless you clear the board.
+  if (challenge && outcome !== "win") {
+    result.coins = 0;
+    result.multiplier = 0;
+    result.bombs = { mine: 0, uxo: 0, brokenArrow: 0 };
+    result.bombTotal = 0;
+    result.breakdown = [{ label: "Challenge — no win, no reward", amount: "×0" }];
+  }
+
+  return result;
 }
 
 /* ==================================================================

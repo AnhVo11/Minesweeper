@@ -149,6 +149,7 @@ const steps = [];
     clone();
     const stack = [start];
     let did = false;
+    const chunk = [];
     while (stack.length) {
       const i = stack.pop();
       const c = next[i];
@@ -156,14 +157,15 @@ const steps = [];
       c.revealed = true;
       c.flagged = false;
       opened++;
-      if (record) steps.push({ t: "open", i });
       did = true;
+      if (record) chunk.push(i);
       if (c.adj === 0) {
         neighborsOf(i, rows, cols).forEach((n) => {
           if (!next[n].revealed && !proven(n)) stack.push(n);
         });
       }
     }
+    if (record && chunk.length) steps.push({ t: "open", is: chunk });
     return did;
   };
 

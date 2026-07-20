@@ -40,6 +40,7 @@ const MODES = {
   medium: { label: "Medium", rows: 16, cols: 16, mines: 40 },
   hard: { label: "Hard", rows: 30, cols: 16, mines: 99 },
   extreme: { label: "Extreme", rows: 40, cols: 24, mines: 199 },
+  challenge: { label: "Challenge", rows: 20, cols: 20, mines: 100 },
   custom: { label: "Custom", rows: 12, cols: 12, mines: 24 },
 };
 
@@ -72,6 +73,7 @@ const C = {
   gold: "#F5D06B",
   violet: "#C99CFF",
   brown: "#8B5A2B",
+  mine: "#2E7D4F",   // ordinary Mine indicator — dark green
   black: "#0A0C10",
   mineBg: "#3A2430",
 };
@@ -192,13 +194,13 @@ function floodReveal(board, rows, cols, start) {
 /*  Cell                                                               */
 /* ------------------------------------------------------------------ */
 
-const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPress, onLongPress }) {
+const Cell = React.memo(function Cell({ cell, size, over, won, peek, bombType, onPress, onLongPress }) {
   const showMine = cell.revealed && cell.mine;
   const wrongFlag = over && cell.flagged && !cell.mine;
 
   let bg = C.cellUp;
   if (cell.exploded) bg = C.red;
-  else if (showMine) bg = C.cellDown;
+  else if (showMine) bg = won ? C.cellDown : C.cellUp;
   else if (cell.revealed) bg = C.cellDown;
 
   const isNumber = cell.revealed && !cell.mine && cell.adj > 0;
@@ -216,9 +218,9 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
           height: size,
           borderRadius: size < 16 ? 2 : 6,
           backgroundColor: bg,
-          borderTopColor: cell.revealed ? "transparent" : "rgba(255,255,255,0.10)",
+          borderTopColor: cell.revealed && !(showMine && !won) ? "transparent" : "rgba(255,255,255,0.10)",
         },
-        
+
       ]}
     >
       {isNumber && (
@@ -236,7 +238,7 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
         </Text>
       )}
 
-     {/* Flag — a red pennant off an implied pole on the left. Always full
+      {/* Flag — a red pennant off an implied pole on the left. Always full
           opacity; whether it's proven shows up as the locked border instead. */}
       {!cell.revealed && cell.flagged && !wrongFlag && (
         <View style={{
@@ -249,7 +251,7 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
       )}
 
 
-    {/* A flag that turned out to be wrong. */}
+      {/* A flag that turned out to be wrong. */}
       {wrongFlag && (
         <View style={{
           width: size * 0.5, height: size * 0.5, borderRadius: 2,
@@ -276,14 +278,24 @@ const Cell = React.memo(function Cell({ cell, size, over, peek, bombType, onPres
       )}
 
       {/* Every other mine, typed and coloured once the game is over. */}
+      {/* Every other mine. On a WIN, reveal its type by colour (dark-green Mine,
+          gold UXO, violet Broken Arrow) — your flags become these markers. On a
+          loss it's just an anonymous black circle; you don't learn what it was. */}
       {showMine && !cell.exploded && (
-        <View style={{
-          width: size * 0.5, height: size * 0.5, borderRadius: 2,
-          backgroundColor:
-            bombType === "uxo" ? C.gold
-            : bombType === "brokenArrow" ? C.violet
-            : C.brown,
-        }} />
+        won ? (
+          <View style={{
+            width: size * 0.5, height: size * 0.5, borderRadius: 2,
+            backgroundColor:
+              bombType === "uxo" ? C.gold
+              : bombType === "brokenArrow" ? C.violet
+              : C.mine,
+          }} />
+        ) : (
+          <View style={{
+            width: size * 0.55, height: size * 0.55, borderRadius: size,
+            backgroundColor: C.black,
+          }} />
+        )
       )}
 
       {peek && !cell.revealed && !cell.flagged && cell.mine && (
@@ -327,7 +339,7 @@ export default function App() {
   const [time, setTime] = useState(0);
   const [run, setRun] = useState(null); // scored result of the finished game
   const [bombMap, setBombMap] = useState({});
-const [proven, setProven] = useState(new Set());
+  const [proven, setProven] = useState(new Set());
   const provenRef = useRef(new Set());
   const provenEverRef = useRef(new Set()); // every mine logic ever pinned down
   // profile
@@ -338,7 +350,7 @@ const [proven, setProven] = useState(new Set());
   const stepsRef = useRef([]);
   const animBoardRef = useRef(null);
   const solveCtxRef = useRef({ click: null });
-  const endSolveRef = useRef(() => {});
+  const endSolveRef = useRef(() => { });
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [profileOpen, setProfileOpen] = useState(false);
   const [code, setCode] = useState("");
@@ -355,6 +367,7 @@ const [proven, setProven] = useState(new Set());
   const safeOpened = board.filter((c) => c.revealed && !c.mine).length;
   const flagsPlaced = board.filter((c) => c.flagged).length;
   const active = status === "idle" || status === "playing";
+  const challenge = modeKey === "challenge";
   const accent = blind ? C.amber : C.green;
 
   useEffect(() => { loadProfile().then(setProfile); }, []);
@@ -374,9 +387,11 @@ const [proven, setProven] = useState(new Set());
       const b = animBoardRef.current.slice();        // new array, new objects only for changed cells
       for (let k = 0; k < per && steps.length; k++) {
         const s = steps.shift();
-        b[s.i] = s.t === "flag"
-          ? { ...b[s.i], flagged: true, auto: true }
-          : { ...b[s.i], revealed: true, flagged: false };
+        if (s.t === "flag") {
+          b[s.i] = { ...b[s.i], flagged: true, auto: true };
+        } else {
+          s.is.forEach((idx) => { b[idx] = { ...b[idx], revealed: true, flagged: false }; });
+        }
       }
       animBoardRef.current = b;
       setBoard(b);
@@ -392,9 +407,13 @@ const [proven, setProven] = useState(new Set());
   const boardH = rows * cellSize + GAP * (rows - 1);
 
   /* ---------- lifecycle ---------- */
-const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smartOn) => {
+  const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smartOn) => {
     const base = key === "custom" ? clampCustom(customRaw) : MODES[key];
-    
+
+    // Challenge forces the full solver on and blind off — the bot clears
+    // everything deducible and you only make the guesses.
+    if (key === "challenge") { blindOn = false; assistOn = true; sweepOn = true; smartOn = true; }
+
     setModeKey(key);
     setBlind(blindOn);
     setAssist(assistOn);
@@ -435,10 +454,10 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
   };
   const restart = () => startGame(modeKey, pendingCustom, blind, assist, sweep, smart);
 
-  const openMenu = () => { setPendingMode(modeKey); setPendingAssist(assist); setMenuOpen(true);setPendingSmart(smart); };
+  const openMenu = () => { setPendingMode(modeKey); setPendingAssist(assist); setMenuOpen(true); setPendingSmart(smart); };
 
   const startFromMenu = () => {
-   startGame(pendingMode, pendingCustom, blind, pendingAssist, pendingSweep, pendingSmart);
+    startGame(pendingMode, pendingCustom, blind, pendingAssist, pendingSweep, pendingSmart);
     setMenuOpen(false);
   };
 
@@ -454,7 +473,7 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
         {
           text: on ? "Restart blind" : "Restart normal",
           style: on ? "destructive" : "default",
-         onPress: () => { startGame(pendingMode, pendingCustom, on, pendingAssist, pendingSweep, pendingSmart); setMenuOpen(false); },
+          onPress: () => { startGame(pendingMode, pendingCustom, on, pendingAssist, pendingSweep, pendingSmart); setMenuOpen(false); },
         },
       ]
     );
@@ -463,7 +482,13 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
   /* ---------- finishing a run ---------- */
   const finish = async (finalBoard, outcome, click) => {
     setStatus(outcome === "win" ? "won" : outcome === "surrender" ? "surrendered" : "lost");
-
+// On a win, flip every mine to revealed so the board can show its type — your
+    // flags turn into their bomb-type markers. A loss already revealed them; a
+    // surrender leaves them hidden.
+    if (outcome === "win") {
+      finalBoard = finalBoard.map((x) => (x.mine ? { ...x, revealed: true } : x));
+      setBoard(finalBoard);
+    }
     /*
     // Endgame pass. sweepBot gets one last solve on the finished board, but with
     // global mine-counting OFF (totalMines = null) — so it can only prove a mine
@@ -485,13 +510,14 @@ const startGame = useCallback((key, customRaw, blindOn, assistOn, sweepOn, smart
       assist,
       sweep,
       smart,
+      challenge,
       provenMines: provenRef.current,
       provenEver: provenEverRef.current,
       undeducibleEver: undeducibleEverRef.current,
       mode: MODES[modeKey].label,
       time,
     });
-setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeducibleEverRef.current));
+    setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeducibleEverRef.current));
     setRun(scored);
     Vibration.vibrate(outcome === "loss" ? 200 : [0, 40, 60, 40]);
 
@@ -505,7 +531,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
   };
 
   const askSurrender = () => {
-    if (status !== "playing") return;
+    if (status !== "playing" || challenge) return;
     Alert.alert(
       "Bank what you have?",
       `Surrender keeps 100% of your coins and every mine you correctly flagged — specials included. Play on and a wrong dig costs you ${Math.round((1 - PAYOUT.loss) * 100)}% of the coins, and your bombs all downgrade to plain Mines.`,
@@ -515,12 +541,12 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
       ]
     );
   };
-// The assistant plants every flag Rule 1 proves. It never opens a square —
+  // The assistant plants every flag Rule 1 proves. It never opens a square —
   // you still choose every dig yourself.
   // Flags what it can prove, then opens what that proves safe — and repeats.
- const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep, smart, mines).board);
+  const settle = (nb) => (blind || !assist ? nb : applyAssist(nb, rows, cols, sweep, smart, mines).board);
 
- // The referee runs at full strength after every move, whatever the player has
+  // The referee runs at full strength after every move, whatever the player has
   // switched on. It decides which flags are proven and which mines were stranded
   // on the coastline of a stalled board — the UXOs.
   // The referee runs at full strength after every move, whatever the player has
@@ -577,11 +603,13 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
   const skipSolve = () => {
     const steps = stepsRef.current;
     const b = animBoardRef.current.slice();
-    while (steps.length) {
+   while (steps.length) {
       const s = steps.shift();
-      b[s.i] = s.t === "flag"
-        ? { ...b[s.i], flagged: true, auto: true }
-        : { ...b[s.i], revealed: true, flagged: false };
+      if (s.t === "flag") {
+        b[s.i] = { ...b[s.i], flagged: true, auto: true };
+      } else {
+        s.is.forEach((idx) => { b[idx] = { ...b[idx], revealed: true, flagged: false }; });
+      }
     }
     animBoardRef.current = b;
     setBoard(b);
@@ -620,7 +648,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
         nb = nb.map((x) => (x.mine ? { ...x, revealed: true } : x));
         setBoard(nb);
         finish(nb, "loss", click);
-     } else {
+      } else {
         applyMoveResult(nb, click);
       }
       return;
@@ -639,7 +667,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
       return;
     }
 
-   const nb = floodReveal(b, rows, cols, i);
+    const nb = floodReveal(b, rows, cols, i);
     applyMoveResult(nb, click);
   };
 
@@ -658,7 +686,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
 
   const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   const progress = totalSafe ? safeOpened / totalSafe : 0;
- const liveEarned = board.reduce((a, c, i) => a + (c.flagged && proven.has(i) ? 1 : 0), 0);
+  const liveEarned = board.reduce((a, c, i) => a + (c.flagged && proven.has(i) ? 1 : 0), 0);
   const face = status === "lost" ? ":(" : status === "won" ? ":D" : status === "surrendered" ? ":|" : ":)";
 
   /* ---------- render ---------- */
@@ -717,31 +745,8 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
             <Text style={styles.statusText}>{fmt(time)}</Text>
           </View>
         </View>
-      </View>
 
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        maximumZoomScale={6}
-        minimumZoomScale={1}
-        bouncesZoom
-      >
-       <View style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 6, padding: 3 }]}>
-          <View style={{ width: boardW, height: boardH, flexDirection: "row", flexWrap: "wrap", gap: GAP }}>
-            {board.map((cell, i) => (
-              <Cell
-                key={i}
-                cell={cell}
-                size={cellSize}
-                over={!active}
-                onPress={() => handlePress(i)}
-                onLongPress={() => toggleFlag(i)}
-                peek={peek}
-                bombType={bombMap[i]}
-              />
-            ))}
-          </View>
-          {solving && (
+        {solving && (
           <View style={styles.solveBar}>
             <Text style={styles.solveLabel}>Assistant solving…</Text>
             <View style={{ flexDirection: "row", gap: 8 }}>
@@ -754,6 +759,31 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
             </View>
           </View>
         )}
+      </View>
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        maximumZoomScale={6}
+        minimumZoomScale={1}
+        bouncesZoom
+      >
+        <View style={[styles.boardFrame, { borderColor: blind ? "#FFB45455" : C.line, width: boardW + 6, padding: 3 }]}>
+          <View style={{ width: boardW, height: boardH, flexDirection: "row", flexWrap: "wrap", gap: GAP }}>
+            {board.map((cell, i) => (
+             <Cell
+                key={i}
+                cell={cell}
+                size={cellSize}
+                over={!active}
+                won={status === "won"}
+                onPress={() => handlePress(i)}
+                onLongPress={() => toggleFlag(i)}
+                peek={peek}
+                bombType={bombMap[i]}
+              />
+            ))}
+          </View>
         </View>
 
         <Text style={styles.hint}>
@@ -765,7 +795,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
         </Text>
 
         {/* Surrender */}
-        {status === "playing" && !solving && (
+        {status === "playing" && !solving && !challenge && (
           <Pressable onPress={askSurrender} style={styles.surrenderBtn}>
             <Text style={styles.surrenderText}>Surrender & bank</Text>
           </Pressable>
@@ -974,7 +1004,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
               <View style={[styles.switchKnob, { left: blind ? 22 : 3 }]} />
             </View>
           </Pressable>
-          
+
           <Pressable
             onPress={() => setPendingAssist(!pendingAssist)}
             disabled={blind}
@@ -984,7 +1014,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
               borderColor: pendingAssist ? C.green : C.line,
               backgroundColor: pendingAssist ? "#5EE6B018" : C.bg,
             }
-          ]}
+            ]}
           >
             <View style={{ flex: 1, paddingRight: 12 }}>
               <Text style={[styles.blindTitle, { color: pendingAssist ? C.green : C.text }]}>
@@ -1038,7 +1068,7 @@ setBombMap(classifyMines(finalBoard, rows, cols, provenEverRef.current, undeduci
                 └ Smart sweep
               </Text>
               <Text style={styles.blindSub}>
-              Solves everything except a true 50/50. Costs a further{" "}
+                Solves everything except a true 50/50. Costs a further{" "}
                 {Math.round((1 - SMART_MULTIPLIER) * 100)}%.
               </Text>
             </View>
@@ -1137,7 +1167,7 @@ const styles = StyleSheet.create({
   solveBar: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     backgroundColor: C.panel, borderRadius: 12, borderWidth: 1, borderColor: C.green,
-    paddingVertical: 8, paddingHorizontal: 12, marginTop: 10, marginBottom: 4,
+    paddingVertical: 8, paddingHorizontal: 12, marginTop: 10, marginBottom: 0,
   },
   solveLabel: { color: C.green, fontSize: 12, fontWeight: "700" },
   solveBtn: {
